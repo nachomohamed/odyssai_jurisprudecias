@@ -73,3 +73,4 @@ Thumbs.db
 .env
 *.env
 openai_api_key.txt
+*.ipynb
