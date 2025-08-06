@@ -32,20 +32,32 @@ import glob
 
 @st.cache_resource
 def init_vectorstore():
-    # Buscar todos los archivos .doc en la carpeta data
     file_paths = glob.glob("data/*.doc")
+    st.write(f"🗂️ Archivos encontrados: {file_paths}")
+
     docs = []
     for file_path in file_paths:
         loader = UnstructuredFileLoader(file_path)
-        docs.extend(loader.load())
+        loaded_docs = loader.load()
+        st.write(f"📄 {file_path} cargó {len(loaded_docs)} documentos.")
+        docs.extend(loaded_docs)
+
+    if not docs:
+        st.error("❌ No se cargaron documentos desde los archivos .doc.")
+        return None
 
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     splits = text_splitter.split_documents(docs)
+    st.write(f"✂️ Se generaron {len(splits)} fragmentos de texto.")
+
+    if not splits:
+        st.error("❌ No se generaron fragmentos para los documentos.")
+        return None
 
     vectorstore = FAISS.from_documents(
         documents=splits,
         embedding=OpenAIEmbeddings(openai_api_key=openai_api_key)
-    )   
+    )
     return vectorstore.as_retriever()
 
 retriever = init_vectorstore()
