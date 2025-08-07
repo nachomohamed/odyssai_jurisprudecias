@@ -23,7 +23,11 @@ if not openai_api_key:
 @st.cache_resource
 def load_vectorstore():
     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-    return FAISS.load_local("vectorstore_jurisprudencia", embeddings).as_retriever()
+    return FAISS.load_local(
+        "vectorstore_jurisprudencia",
+        embeddings,
+        allow_dangerous_deserialization=True  # 👈 necesario desde langchain 0.2+
+    ).as_retriever()
 
 retriever = load_vectorstore()
 
