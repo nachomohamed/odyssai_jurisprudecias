@@ -75,3 +75,4 @@ Thumbs.db
 openai_api_key.txt
 *.ipynb
 /converted_txt
+secrets.toml
