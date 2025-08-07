@@ -46,8 +46,10 @@ prompt = ChatPromptTemplate.from_messages([
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3, openai_api_key=openai_api_key)
 qa_chain = create_stuff_documents_chain(llm, prompt)
 rag_chain = (
-    RunnableMap({"context": retriever, "input": lambda x: x["input"]})
-    | qa_chain
+    RunnableMap({
+        "context": RunnableLambda(lambda x: retriever.invoke(x["input"])),
+        "input": lambda x: x["input"]
+    }) | qa_chain
 )
 # --- Memoria de conversación ---
 store = {}
