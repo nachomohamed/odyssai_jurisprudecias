@@ -15,7 +15,7 @@ st.set_page_config(page_title="Jurisprudencia Assistant", layout="wide")
 st.title("⚖️ Jurisprudencia Assistant")
 
 # --------------------- CLAVE DE OPENAI DESDE SECRETS ---------------------
-openai_api_key = st.secrets["OPENAI_KEY"]  # ← asegúrate de que se llame así en tu secrets.toml
+openai_api_key = st.secrets["OPENIA_KEY"]  # ← asegúrate de que se llame así en tu secrets.toml
 os.environ["OPENAI_API_KEY"] = openai_api_key
 
 # Validar clave (esto lanza error si es inválida)
