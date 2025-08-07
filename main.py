@@ -19,6 +19,15 @@ if not openai_api_key:
     st.sidebar.warning("Por favor, ingresá tu OpenAI API Key.")
     st.stop()
 
+import openai
+
+try:
+    openai.api_key = openai_api_key
+    openai.Model.list()  # Esto lanza un error si la API Key es inválida
+except openai.AuthenticationError:
+    st.error("❌ API Key inválida. Revisá que esté bien escrita.")
+    st.stop()
+
 # --- Cargar vectorstore desde disco ---
 @st.cache_resource
 def load_vectorstore():
