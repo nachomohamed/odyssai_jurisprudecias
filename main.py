@@ -6,6 +6,8 @@ from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables import RunnableLambda, RunnableMap
+
 
 # Configuración de la página
 st.set_page_config(page_title="Jurisprudencia Assistant", layout="wide")
@@ -39,8 +41,10 @@ prompt = ChatPromptTemplate.from_messages([
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3, openai_api_key=openai_api_key)
 qa_chain = create_stuff_documents_chain(llm, prompt)
-rag_chain = create_retrieval_chain(retriever, qa_chain)
-
+rag_chain = (
+    RunnableMap({"context": retriever, "input": lambda x: x["input"]})
+    | qa_chain
+)
 # --- Memoria de conversación ---
 store = {}
 
