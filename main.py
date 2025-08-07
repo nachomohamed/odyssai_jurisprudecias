@@ -97,6 +97,6 @@ if user_input := st.chat_input("Escribí tu consulta legal..."):
         config={"configurable": {"session_id": "juris-chat"}}
     )
 
-    answer = response["answer"]
+    answer = response  # ya es un string
     st.session_state.messages.append({"role": "assistant", "content": answer})
     st.chat_message("assistant").markdown(answer)
