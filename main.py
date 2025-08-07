@@ -1,50 +1,40 @@
 import streamlit as st
-import os
-import openai
-
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.runnables import RunnableLambda, RunnableMap
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.runnables import RunnableLambda, RunnableMap
 
-# --------------------- CONFIGURACIÓN DE PÁGINA ---------------------
+# Configuración
 st.set_page_config(page_title="Jurisprudencia Assistant", layout="wide")
 st.title("⚖️ Jurisprudencia Assistant")
 
-# --------------------- CLAVE DE OPENAI DESDE SECRETS ---------------------
-openai_api_key = st.secrets["OPENIA_KEY"]  # ← asegúrate de que se llame así en tu secrets.toml
-os.environ["OPENAI_API_KEY"] = openai_api_key
+# Obtener API key desde Streamlit Secrets
+openai_api_key = st.secrets["OPENAI_KEY"]
 
-try:
-    client = openai.OpenAI(api_key=openai_api_key)
-    models = client.models.list()
-    print("✅ La API Key es válida. Modelos disponibles:")
-    for model in models.data:
-        print(model.id)
-except openai.AuthenticationError:
-    print("❌ La API Key es inválida o no fue cargada correctamente.")
-except Exception as e:
-    print(f"⚠️ Ocurrió otro error: {e}")
-
-# --------------------- CARGAR VECTORSTORE ---------------------
+# Vectorstore cacheado
 @st.cache_resource
 def load_vectorstore():
     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-    return FAISS.load_local(
-        "vectorstore_jurisprudencia",
-        embeddings,
-        allow_dangerous_deserialization=True
-    ).as_retriever()
+    try:
+        return FAISS.load_local(
+            "vectorstore_jurisprudencia",
+            embeddings,
+            allow_dangerous_deserialization=True
+        ).as_retriever()
+    except Exception as e:
+        st.error(f"❌ Error cargando el vectorstore: {e}")
+        st.stop()
 
 retriever = load_vectorstore()
 
-# --------------------- PROMPT Y LLM ---------------------
+# Prompt y LLM
 system_prompt = (
-    "You are an assistant specialized in jurisprudence. Use the retrieved legal context "
-    "to answer user questions. If unsure, say you don't know. Keep answers concise and formal.\n\n"
+    "Sos un asistente especializado en jurisprudencia. Usá el contexto legal recuperado "
+    "para responder las preguntas. Si no sabés, decilo claramente. Sé conciso y formal.\n\n"
     "{context}"
 )
 
@@ -56,14 +46,13 @@ prompt = ChatPromptTemplate.from_messages([
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3, openai_api_key=openai_api_key)
 qa_chain = create_stuff_documents_chain(llm, prompt)
 
-rag_chain = (
-    RunnableMap({
-        "context": RunnableLambda(lambda x: retriever.invoke(x["input"])),
-        "input": lambda x: x["input"]
-    }) | qa_chain
-)
+# RAG Chain (contexto + pregunta)
+rag_chain = RunnableMap({
+    "context": lambda x: retriever.invoke(x["input"]),
+    "input": lambda x: x["input"]
+}) | qa_chain
 
-# --------------------- HISTORIAL DE CONVERSACIÓN ---------------------
+# Memoria de conversación
 store = {}
 
 def get_session_history(session_id: str):
@@ -75,19 +64,16 @@ conversational_rag = RunnableWithMessageHistory(
     rag_chain,
     get_session_history,
     input_messages_key="input",
-    history_messages_key="chat_history",
-    output_messages_key="answer"
+    history_messages_key="chat_history"
 )
 
-# --------------------- INTERFAZ DE CHAT ---------------------
+# Interfaz de chat
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Mostrar historial
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).markdown(msg["content"])
 
-# Entrada del usuario
 if user_input := st.chat_input("Escribí tu consulta legal..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.chat_message("user").markdown(user_input)
@@ -97,6 +83,7 @@ if user_input := st.chat_input("Escribí tu consulta legal..."):
         config={"configurable": {"session_id": "juris-chat"}}
     )
 
-    answer = response  # ya es un string
+    # Corregido: la respuesta ya es un string
+    answer = response
     st.session_state.messages.append({"role": "assistant", "content": answer})
     st.chat_message("assistant").markdown(answer)
