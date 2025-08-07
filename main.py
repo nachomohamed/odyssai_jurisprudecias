@@ -1,83 +1,47 @@
 import streamlit as st
-import os
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.messages import AIMessage, HumanMessage
 
-model = "gpt-4o-mini"
-
-# Page config
-st.set_page_config(page_title="LangChain Chatbot", layout="wide")
-
-# API Key input (only once)
-openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.sidebar.warning("Please provide your OpenAI API Key.")
-    st.stop()
-
-st.set_page_config(page_title="Juriprudencia Chatbot", layout="wide")
+# Configuración de la página
+st.set_page_config(page_title="Jurisprudencia Assistant", layout="wide")
 st.title("⚖️ Jurisprudencia Assistant")
 
-# --- Initialize Vector Store (only once per session) ---
+# Sidebar: clave de OpenAI
+openai_api_key = st.sidebar.text_input("🔑 OpenAI API Key", type="password")
+if not openai_api_key:
+    st.sidebar.warning("Por favor, ingresá tu OpenAI API Key.")
+    st.stop()
 
-from langchain_community.document_loaders import UnstructuredFileLoader
-import glob
-
+# --- Cargar vectorstore desde disco ---
 @st.cache_resource
-def init_vectorstore():
-    file_paths = glob.glob("data/*.doc")
-    st.write(f"🗂️ Archivos encontrados: {file_paths}")
+def load_vectorstore():
+    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+    return FAISS.load_local("vectorstore_jurisprudencia", embeddings).as_retriever()
 
-    docs = []
-    for file_path in file_paths:
-        loader = UnstructuredFileLoader(file_path)
-        loaded_docs = loader.load()
-        st.write(f"📄 {file_path} cargó {len(loaded_docs)} documentos.")
-        docs.extend(loaded_docs)
+retriever = load_vectorstore()
 
-    if not docs:
-        st.error("❌ No se cargaron documentos desde los archivos .doc.")
-        return None
-
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(docs)
-    st.write(f"✂️ Se generaron {len(splits)} fragmentos de texto.")
-
-    if not splits:
-        st.error("❌ No se generaron fragmentos para los documentos.")
-        return None
-
-    vectorstore = FAISS.from_documents(
-        documents=splits,
-        embedding=OpenAIEmbeddings(openai_api_key=openai_api_key)
-    )
-    return vectorstore.as_retriever()
-
-retriever = init_vectorstore()
-
-# --- Setup LangChain ---
+# --- Prompt y LLM ---
 system_prompt = (
     "You are an assistant specialized in jurisprudence. Use the retrieved legal context "
     "to answer user questions. If unsure, say you don't know. Keep answers concise and formal.\n\n"
     "{context}"
 )
 
-prompt = ChatPromptTemplate.from_messages(
-    [("system", system_prompt), ("human", "{input}")]
-)
+prompt = ChatPromptTemplate.from_messages([
+    ("system", system_prompt),
+    ("human", "{input}")
+])
 
-llm = ChatOpenAI(model=model, temperature=0.3, openai_api_key=openai_api_key)
+llm = ChatOpenAI(model="gpt-4o", temperature=0.3, openai_api_key=openai_api_key)
 qa_chain = create_stuff_documents_chain(llm, prompt)
 rag_chain = create_retrieval_chain(retriever, qa_chain)
 
-# --- Memory with RunnableWithMessageHistory ---
+# --- Memoria de conversación ---
 store = {}
 
 def get_session_history(session_id: str):
@@ -86,26 +50,27 @@ def get_session_history(session_id: str):
     return store[session_id]
 
 conversational_rag = RunnableWithMessageHistory(
-    rag_chain, get_session_history,
+    rag_chain,
+    get_session_history,
     input_messages_key="input",
     history_messages_key="chat_history",
     output_messages_key="answer"
 )
 
-# --- Chat UI ---
+# --- Interfaz de chat ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).markdown(msg["content"])
 
-if query := st.chat_input("Ask about a jurisprudencia case..."):
-    st.session_state.messages.append({"role": "user", "content": query})
-    st.chat_message("user").markdown(query)
+if user_input := st.chat_input("Escribí tu consulta legal..."):
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.chat_message("user").markdown(user_input)
 
     response = conversational_rag.invoke(
-        {"input": query},
-        config={"configurable": {"session_id": "juris-001"}}
+        {"input": user_input},
+        config={"configurable": {"session_id": "juris-chat"}}
     )
 
     answer = response["answer"]
