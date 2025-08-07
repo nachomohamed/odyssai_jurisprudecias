@@ -18,13 +18,16 @@ st.title("⚖️ Jurisprudencia Assistant")
 openai_api_key = st.secrets["OPENIA_KEY"]  # ← asegúrate de que se llame así en tu secrets.toml
 os.environ["OPENAI_API_KEY"] = openai_api_key
 
-# Validar clave (esto lanza error si es inválida)
 try:
-    openai.api_key = openai_api_key
-    openai.Model.list()
+    client = openai.OpenAI(api_key=openai_api_key)
+    models = client.models.list()
+    print("✅ La API Key es válida. Modelos disponibles:")
+    for model in models.data:
+        print(model.id)
 except openai.AuthenticationError:
-    st.error("❌ API Key inválida. Revisá tu configuración en Secrets.")
-    st.stop()
+    print("❌ La API Key es inválida o no fue cargada correctamente.")
+except Exception as e:
+    print(f"⚠️ Ocurrió otro error: {e}")
 
 # --------------------- CARGAR VECTORSTORE ---------------------
 @st.cache_resource
