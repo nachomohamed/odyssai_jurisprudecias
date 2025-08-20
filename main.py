@@ -1,80 +1,27 @@
+# app.py
 import streamlit as st
+import pandas as pd
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_community.chat_message_histories import ChatMessageHistory
 
-# =============================
-# Configuración base
-# =============================
 st.set_page_config(page_title="⚖️ Jurisprudencia Assistant", layout="wide")
 st.title("⚖️ Jurisprudencia Assistant")
 
-# API Key desde Streamlit Secrets
 openai_api_key = st.secrets["OPENAI_KEY"]
 
-# =============================
-# Carga del vectorstore (cacheado)
-# =============================
 @st.cache_resource
-def load_vectorstore():
+def load_retriever():
     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-    try:
-        vs = FAISS.load_local(
-            "vectorstore_jurisprudencia",
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
-        # Ajustamos a top-3 resultados
-        retriever = vs.as_retriever(search_kwargs={"k": 3})
-        return retriever
-    except Exception as e:
-        st.error(f"❌ Error cargando el vectorstore: {e}")
-        st.stop()
+    vs = FAISS.load_local(
+        "vectorstore_jurisprudencia",
+        embeddings,
+        allow_dangerous_deserialization=True
+    )
+    return vs.as_retriever(search_kwargs={"k": 3})
 
-retriever = load_vectorstore()
-
-# =============================
-# LLM y prompts
-# =============================
+retriever = load_retriever()
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3, openai_api_key=openai_api_key)
-
-# Prompt para responder con contexto (si lo necesitás luego)
-system_prompt = (
-    "Sos un asistente especializado en jurisprudencia. Usá el contexto legal recuperado "
-    "para responder las preguntas. Si no sabés, decilo claramente. Sé conciso y formal.\n\n"
-    "{context}"
-)
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{input}")
-])
-# (Opcional) Cadena para QA estilo stuff si querés usarla en otro flujo
-qa_chain = create_stuff_documents_chain(llm, prompt)
-
-# =============================
-# Memoria simple de chat (frontend)
-# =============================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).markdown(msg["content"])
-
-# =============================
-# Helpers
-# =============================
-def summarize_doc(doc):
-    """Arma un header prolijo con metadata si existe y devuelve (header, cuerpo)."""
-    meta = getattr(doc, "metadata", {}) or {}
-    titulo = meta.get("caratula") or meta.get("titulo") or meta.get("title") or "Jurisprudencia"
-    tribunal = meta.get("tribunal_principal") or meta.get("tribunal") or ""
-    fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
-    extra = " — ".join([x for x in [tribunal, fecha] if x])
-    header = f"**{titulo}**" + (f" ({extra})" if extra else "")
-    cuerpo = getattr(doc, "page_content", str(doc))
-    return header, cuerpo
 
 rationale_system = (
     "Eres un asistente jurídico. Explica en 2–4 frases por qué este fallo es útil para el caso del abogado, "
@@ -83,7 +30,6 @@ rationale_system = (
 )
 
 def explain_match(user_query, doc):
-    """Pide al LLM una explicación breve de por qué el doc es útil para la consulta."""
     msgs = [
         {"role": "system", "content": rationale_system},
         {"role": "user", "content": f"Consulta del abogado:\n{user_query}\n\nFallo recuperado:\n{doc.page_content[:5000]}"},
@@ -91,40 +37,80 @@ def explain_match(user_query, doc):
     out = llm.invoke(msgs)
     return out.content if hasattr(out, "content") else str(out)
 
-# =============================
-# Interfaz de chat principal
-# =============================
-user_input = st.chat_input("Planteá tu caso (hechos, norma, jurisdicción, año, lo más específico posible)...")
+# Orden sugerido de columnas para mostrar primero
+DISPLAY_ORDER = [
+    "caratula",
+    "tribunal_principal", "tribunal_sala",
+    "tipo_causa",
+    "nro_expediente", "nro_sentencia", "registro",
+    "fecha_sentencia",
+    "sumario",
+    "texto",
+]
+
+def render_kv_table(meta: dict):
+    """Renderiza tabla 'Columna | Contenido' y pone sumario/texto en expanders."""
+    meta = meta or {}
+
+    # Armo filas en orden preferido primero
+    rows = []
+    seen = set()
+    for k in DISPLAY_ORDER:
+        if k in meta and meta[k] not in (None, "", "nan"):
+            val = str(meta[k])
+            if k in ["sumario", "texto"]:
+                # Los largos, en expander aparte
+                continue
+            rows.append({"Columna": k, "Contenido": val})
+            seen.add(k)
+
+    # Luego resto de campos que vengan en metadata
+    for k, v in meta.items():
+        if k in seen or k in ["sumario", "texto"]:
+            continue
+        if v not in (None, "", "nan"):
+            rows.append({"Columna": k, "Contenido": str(v)})
+
+    if rows:
+        st.table(pd.DataFrame(rows))
+
+    # Campos largos en expanders separados
+    if meta.get("sumario"):
+        with st.expander("sumario", expanded=True):
+            st.write(str(meta["sumario"]))
+    if meta.get("texto"):
+        with st.expander("texto", expanded=False):
+            st.write(str(meta["texto"]))
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).markdown(msg["content"])
+
+user_input = st.chat_input("Planteá tu caso (hechos, norma, jurisdicción, año, etc.)...")
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.chat_message("user").markdown(user_input)
 
-    # 1) Recupero top-3 documentos
+    # Recupero top-3
     try:
         docs = retriever.get_relevant_documents(user_input)
     except Exception:
-        # Fallback para versiones que soportan invoke
-        try:
-            docs = retriever.invoke(user_input)
-        except Exception as e:
-            docs = []
-            st.warning(f"No se pudo consultar el retriever: {e}")
+        docs = retriever.invoke(user_input)
 
     if not docs:
-        answer = (
-            "Estuve buscando y analizando tu caso, pero no encontré jurisprudencias relevantes en tu base. "
-            "Probá reformular con más detalles (hechos clave, norma aplicable, jurisdicción, año)."
-        )
+        answer = ("Estuve buscando y analizando tu caso, pero no encontré jurisprudencias "
+                  "relevantes en tu base. Afiná la consulta con hechos/norma/jurisdicción/año.")
         st.session_state.messages.append({"role": "assistant", "content": answer})
         st.chat_message("assistant").markdown(answer)
     else:
         st.markdown("**Estuve buscando y analizando tu caso y encontré estas 3:**")
 
-        bloques = []
+        resumen_lineas = []
         for i, doc in enumerate(docs[:3], start=1):
-            # 2) Explicación breve de por qué lo elegí
             razon = explain_match(user_input, doc)
-            header, cuerpo = summarize_doc(doc)
+            titulo = doc.metadata.get("caratula") or doc.metadata.get("titulo") or "Jurisprudencia"
 
             if i == 1:
                 st.markdown(f"**1 - Elegí esta jurisprudencia por:** {razon}")
@@ -133,14 +119,12 @@ if user_input:
             else:
                 st.markdown(f"**3 - Por último, sumé esta porque:** {razon}")
 
-            with st.expander(header, expanded=(i == 1)):
-                st.write(cuerpo)
+            with st.expander(f"**{titulo}**", expanded=(i == 1)):
+                render_kv_table(doc.metadata)  # <- **Columna | Contenido**
 
-            bloques.append((razon, header))
+            resumen_lineas.append(f"{i}. {razon}\n{titulo}")
 
-        # 3) Mensaje compacto al hilo del chat
-        compact = "\n\n".join([f"{idx}. {raz}\n{hdr}" for idx, (raz, hdr) in enumerate(bloques, start=1)])
-        final_msg = f"**Resumen breve:**\n{compact}"
+        final_msg = "**Resumen breve:**\n" + "\n\n".join(resumen_lineas)
         st.session_state.messages.append({"role": "assistant", "content": final_msg})
         st.chat_message("assistant").markdown(final_msg)
 
