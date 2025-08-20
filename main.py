@@ -1,18 +1,28 @@
 # app.py
-import streamlit as st
+import json
 import pandas as pd
+import streamlit as st
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import ChatPromptTemplate
 
+# =============================
+# Configuración base
+# =============================
 st.set_page_config(page_title="⚖️ Jurisprudencia Assistant", layout="wide")
 st.title("⚖️ Jurisprudencia Assistant")
 
+# API Key desde Streamlit Secrets
 openai_api_key = st.secrets["OPENAI_KEY"]
 
+# =============================
+# Carga del retriever (cacheado)
+# =============================
 @st.cache_resource
 def load_retriever():
-    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small",  # podés subir a -3-large si querés
+        openai_api_key=openai_api_key
+    )
     vs = FAISS.load_local(
         "vectorstore_jurisprudencia",
         embeddings,
@@ -21,23 +31,15 @@ def load_retriever():
     return vs.as_retriever(search_kwargs={"k": 3})
 
 retriever = load_retriever()
+
+# =============================
+# LLM
+# =============================
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3, openai_api_key=openai_api_key)
 
-rationale_system = (
-    "Eres un asistente jurídico. Explica en 2–4 frases por qué este fallo es útil para el caso del abogado, "
-    "citando criterios de afinidad: hechos relevantes, tipo de acción, normas aplicadas, resultado, "
-    "jurisdicción/instancia/fecha si aportan. Sé concreto y no inventes."
-)
-
-def explain_match(user_query, doc):
-    msgs = [
-        {"role": "system", "content": rationale_system},
-        {"role": "user", "content": f"Consulta del abogado:\n{user_query}\n\nFallo recuperado:\n{doc.page_content[:5000]}"},
-    ]
-    out = llm.invoke(msgs)
-    return out.content if hasattr(out, "content") else str(out)
-
-# Orden sugerido de columnas para mostrar primero
+# =============================
+# Helpers UI
+# =============================
 DISPLAY_ORDER = [
     "caratula",
     "tribunal_principal", "tribunal_sala",
@@ -51,20 +53,18 @@ DISPLAY_ORDER = [
 def render_kv_table(meta: dict):
     """Renderiza tabla 'Columna | Contenido' y pone sumario/texto en expanders."""
     meta = meta or {}
-
-    # Armo filas en orden preferido primero
     rows = []
     seen = set()
+
+    # Primero columnas más útiles
     for k in DISPLAY_ORDER:
         if k in meta and meta[k] not in (None, "", "nan"):
-            val = str(meta[k])
             if k in ["sumario", "texto"]:
-                # Los largos, en expander aparte
                 continue
-            rows.append({"Columna": k, "Contenido": val})
+            rows.append({"Columna": k, "Contenido": str(meta[k])})
             seen.add(k)
 
-    # Luego resto de campos que vengan en metadata
+    # Luego el resto de metadata
     for k, v in meta.items():
         if k in seen or k in ["sumario", "texto"]:
             continue
@@ -74,7 +74,7 @@ def render_kv_table(meta: dict):
     if rows:
         st.table(pd.DataFrame(rows))
 
-    # Campos largos en expanders separados
+    # Campos largos en expanders
     if meta.get("sumario"):
         with st.expander("sumario", expanded=True):
             st.write(str(meta["sumario"]))
@@ -82,12 +82,83 @@ def render_kv_table(meta: dict):
         with st.expander("texto", expanded=False):
             st.write(str(meta["texto"]))
 
+# =============================
+# Helper LLM: intro + razones en JSON
+# =============================
+def llm_intro_and_reasons(llm, user_query, docs):
+    """
+    Devuelve (intro:str, items:list[str]) generados por el LLM en JSON:
+    {
+      "intro": "...",
+      "items": ["razón 1", "razón 2", "razón 3"]
+    }
+    """
+    # Descriptores breves por doc (título/tribunal/fecha + extracto)
+    descriptors = []
+    for d in docs:
+        m = d.metadata or {}
+        titulo = m.get("caratula") or m.get("titulo") or "Jurisprudencia"
+        trib = m.get("tribunal_principal") or m.get("tribunal") or ""
+        fecha = m.get("fecha_sentencia") or m.get("fecha") or ""
+        descriptor = f"{titulo}" + (f" — {trib}" if trib else "") + (f" — {fecha}" if fecha else "")
+        body = d.page_content[:1200] if getattr(d, "page_content", None) else ""
+        descriptors.append({"descriptor": descriptor, "extracto": body})
+
+    system = (
+        "Eres un asistente jurídico. Vas a presentar resultados de búsqueda de jurisprudencia para un abogado. "
+        "Varía el estilo de redacción (no uses siempre las mismas frases). No inventes. Sé profesional y concreto."
+    )
+    user = (
+        "Consulta del abogado:\n"
+        f"{user_query}\n\n"
+        "Fallos recuperados (descriptor + extracto parcial):\n"
+        f"{json.dumps(descriptors, ensure_ascii=False)}\n\n"
+        "TAREA:\n"
+        "1) Escribe una INTRODUCCIÓN breve (1–2 frases) explicando que analizaste el caso y hallaste resultados. "
+        "   Cambia el estilo (evita fórmulas repetidas).\n"
+        "2) Escribe una explicación para CADA fallo (2–4 frases) justificando su pertinencia (hechos, tipo de acción, "
+        "   normas aplicadas, resultado, jurisdicción/instancia/fecha si aportan).\n"
+        "3) Devuelve SOLO JSON válido EXACTAMENTE con este formato:\n"
+        '{\n  "intro": "texto",\n  "items": ["razón 1", "razón 2", "razón 3"]\n}\n'
+        "   El tamaño de 'items' debe coincidir con la cantidad de fallos (máx 3)."
+    )
+
+    out = llm.invoke([
+        {"role": "system", "content": system},
+        {"role": "user", "content": user}
+    ])
+    text = out.content if hasattr(out, "content") else str(out)
+
+    try:
+        data = json.loads(text)
+        intro = (data.get("intro") or "").strip()
+        items = data.get("items") or []
+        items = items[:len(docs)]
+        if not intro or not items:
+            raise ValueError("JSON sin intro/items")
+        return intro, items
+    except Exception:
+        # Fallback por si el modelo no devuelve JSON parseable
+        intro_fb = "Analicé tu consulta y seleccioné los fallos que mejor se ajustan por similitud fáctica y encuadre normativo."
+        items_fb = []
+        for _ in docs:
+            items_fb.append(
+                "Resulta pertinente por la cercanía de los hechos, la norma aplicada y el criterio decidido en el extracto provisto."
+            )
+        return intro_fb, items_fb
+
+# =============================
+# Memoria simple de chat (frontend)
+# =============================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).markdown(msg["content"])
 
+# =============================
+# Interfaz
+# =============================
 user_input = st.chat_input("Planteá tu caso (hechos, norma, jurisdicción, año, etc.)...")
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -100,27 +171,28 @@ if user_input:
         docs = retriever.invoke(user_input)
 
     if not docs:
-        answer = ("Estuve buscando y analizando tu caso, pero no encontré jurisprudencias "
-                  "relevantes en tu base. Afiná la consulta con hechos/norma/jurisdicción/año.")
+        answer = (
+            "No encontré jurisprudencias relevantes en tu base. Probá aportar más detalles "
+            "(hechos clave, norma aplicable, jurisdicción, período)."
+        )
         st.session_state.messages.append({"role": "assistant", "content": answer})
         st.chat_message("assistant").markdown(answer)
     else:
-        st.markdown("**Estuve buscando y analizando tu caso y encontré estas 3:**")
+        # LLM redacta intro + razones (varía el wording)
+        intro, reasons = llm_intro_and_reasons(llm, user_input, docs[:3])
+        st.markdown(f"**{intro}**")
 
         resumen_lineas = []
-        for i, doc in enumerate(docs[:3], start=1):
-            razon = explain_match(user_input, doc)
-            titulo = doc.metadata.get("caratula") or doc.metadata.get("titulo") or "Jurisprudencia"
+        for i, (doc, razon) in enumerate(zip(docs[:3], reasons), start=1):
+            meta = doc.metadata or {}
+            titulo = meta.get("caratula") or meta.get("titulo") or "Jurisprudencia"
+            trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
+            fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
+            header = f"**{titulo}**" + (f" — {trib}" if trib else "") + (f" — {fecha}" if fecha else "")
 
-            if i == 1:
-                st.markdown(f"**1 - Elegí esta jurisprudencia por:** {razon}")
-            elif i == 2:
-                st.markdown(f"**2 - En segundo lugar, creo que esta te puede servir porque:** {razon}")
-            else:
-                st.markdown(f"**3 - Por último, sumé esta porque:** {razon}")
-
-            with st.expander(f"**{titulo}**", expanded=(i == 1)):
-                render_kv_table(doc.metadata)  # <- **Columna | Contenido**
+            st.markdown(f"**{i}.** {razon}")
+            with st.expander(header, expanded=(i == 1)):
+                render_kv_table(meta)
 
             resumen_lineas.append(f"{i}. {razon}\n{titulo}")
 
