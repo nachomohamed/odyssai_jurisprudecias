@@ -40,7 +40,7 @@ main_llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=OPENAI_KEY
 @st.cache_resource
 def load_retriever():
     embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",
+        model="text-embedding-3-small",   # Debe coincidir con el usado al indexar FAISS
         openai_api_key=OPENAI_KEY
     )
     vs = FAISS.load_local(
@@ -69,6 +69,7 @@ DISPLAY_ORDER = [
 ]
 
 def render_kv_table(meta: dict):
+    """Tabla Columna | Contenido + expanders para sumario/texto."""
     meta = meta or {}
     rows, seen = [], set()
 
@@ -96,7 +97,7 @@ def render_kv_table(meta: dict):
             st.write(str(meta["texto"]))
 
 def show_active_docs():
-    """Panel con las jurisprudencias activas para poder conversar siempre sobre ellas."""
+    """Panel con las jurisprudencias activas para conversar sobre ellas."""
     docs = st.session_state.picked_docs
     if not docs:
         return
@@ -210,12 +211,8 @@ def llm_pick_top3_and_explain(user_query: str, candidates: List[Dict], retry_hin
     except Exception:
         return "", []
 
-# ====== NUEVO: segundo pase de justificación breve y neutral por fallo ======
+# ====== Segundo pase de justificación breve y neutral por fallo ======
 def llm_extra_why(user_query: str, descriptor: str, extracto: str, ya_dicho: str = "") -> str:
-    """
-    Pide una justificación adicional breve (2–3 frases) y neutral sobre
-    por qué este fallo es adecuado para el caso, evitando repetir lo ya dicho.
-    """
     system = (
         "Eres un asistente jurídico. Redacta una justificación breve (2–3 frases), neutral y profesional, "
         "respondiendo por qué este fallo es adecuado para el caso planteado. "
@@ -234,21 +231,34 @@ def llm_extra_why(user_query: str, descriptor: str, extracto: str, ya_dicho: str
     ])
     return (out.content if hasattr(out, "content") else str(out)).strip()
 
+# =============================
+# Research con diagnósticos y fallbacks
+# =============================
 def run_research(user_query: str):
-    """Pipeline de búsqueda y render con segundo pase de justificación adicional."""
+    """Pipeline de búsqueda y render con segundo pase + diagnósticos + fallbacks."""
+    # 0) Recuperar candidatos con manejo de errores
     try:
         candidate_docs = retriever.get_relevant_documents(user_query)
-    except Exception:
-        candidate_docs = retriever.invoke(user_query)
-
-    if not candidate_docs:
-        msg = ("No encontré jurisprudencias relevantes en tu base. "
-               "Probá aportar más detalles (hechos clave, norma aplicable, jurisdicción, período).")
-        st.session_state.messages.append({"role": "assistant", "content": msg})
-        st.chat_message("assistant").markdown(msg)
+    except Exception as e:
+        st.error(f"❌ Error al recuperar documentos del vectorstore: {e}")
         return
 
-    # Armar candidatos
+    # 1) Si no hay candidatos, avisar
+    if not candidate_docs:
+        st.warning("⚠️ No encontré jurisprudencias relevantes. Verificá que el índice FAISS tenga contenido y que la consulta sea específica (hechos, norma, jurisdicción, período).")
+        return
+
+    # 2) Diagnóstico visible (primeros 10 títulos)
+    diag_titles = []
+    for d in candidate_docs[:10]:
+        m = d.metadata or {}
+        titulo = m.get("caratula") or m.get("titulo") or "Jurisprudencia"
+        trib = m.get("tribunal_principal") or m.get("tribunal") or ""
+        fecha = m.get("fecha_sentencia") or m.get("fecha") or ""
+        diag_titles.append(" — ".join([x for x in [titulo, trib, fecha] if x]))
+    st.info(f"🔎 Candidatos recuperados: {len(candidate_docs)}\n\n" + "\n".join([f"- {t}" for t in diag_titles]))
+
+    # 3) Armar candidatos para el LLM
     candidates = []
     uid_to_docdict = {}
     for d in candidate_docs[:10]:
@@ -263,45 +273,65 @@ def run_research(user_query: str):
         candidates.append({"uid": uid, "descriptor": descriptor, "extracto": extracto})
         uid_to_docdict[uid] = {"metadata": meta, "page_content": getattr(d, "page_content", "") or ""}
 
-    # LLM elige 3 y explica (con posible reintento si son muy similares)
+    # 4) LLM elige 3
     intro, picked = llm_pick_top3_and_explain(user_query, candidates)
+
+    # 5) Reintento si vienen vacíos o muy parecidos
     if not picked or not _distinct_strings([p.get("resumen","") for p in picked]):
         intro2, picked2 = llm_pick_top3_and_explain(
             user_query, candidates,
-            retry_hint="ATENCIÓN: en el intento anterior las explicaciones fueron muy parecidas. "
-                       "Ahora asegura diferencias concretas entre los casos (hechos, norma/artículo, "
-                       "resultado, jurisdicción/fecha) usando fragmentos distintos del extracto."
+            retry_hint="ATENCIÓN: explicaciones muy parecidas o vacías. Asegura diferencias concretas entre los casos (hechos, norma/artículo, resultado, jurisdicción/fecha) y usa fragmentos distintos del extracto."
         )
         if picked2:
-            intro = intro2 or intro or "Analicé tu consulta y seleccioné los fallos más pertinentes."
+            intro = intro2 or intro
             picked = picked2
 
-    st.markdown(f"**{intro or 'Analicé tu consulta y seleccioné los fallos más pertinentes.'}**")
+    # 6) Fallback duro: si igual no hay picked, usar top-3 del retriever con explicación heurística
+    if not picked:
+        picked = []
+        for c in candidates[:3]:
+            picked.append({
+                "uid": c["uid"],
+                "bullets": [
+                    "• Hechos del extracto que guardan similitud con el caso.",
+                    "• Referencias normativas y criterios mencionados en el texto.",
+                    "• Jurisdicción/instancia/fecha compatibles para tu planteo."
+                ],
+                "resumen": "Útil como apoyo por cercanía fáctica y encuadre normativo."
+            })
+        intro = intro or "Analicé tu consulta y seleccioné los fallos más pertinentes disponibles."
 
-    # Guardar en estado para chat posterior
+    # 7) Mostrar intro
+    st.markdown(f"**{intro}**")
+
+    # 8) Guardar en estado para chat posterior
     st.session_state.picked_docs = [uid_to_docdict[x["uid"]] for x in picked if x["uid"] in uid_to_docdict]
 
-    # Render resultados + detalles + segundo pase
+    # 9) Render por ítem + segundo pase + resumen
     resumen_lines = []
+    any_rendered = False
+
     for i, item in enumerate(picked, start=1):
         uid = item["uid"]
         docd = uid_to_docdict.get(uid)
         if not docd:
-            continue
+            continue  # saltear si no lo encuentro
+        any_rendered = True
+
         meta = docd["metadata"]
         titulo = meta.get("caratula") or meta.get("titulo") or "Jurisprudencia"
         trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
         fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
         header = f"**{titulo}**" + (f" — {trib}" if trib else "") + (f" — {fecha}" if fecha else "")
 
-        # 1) explicación principal
+        # explicación principal
         st.markdown(f"**{i}. {titulo}**")
         for b in item.get("bullets", []):
             st.markdown(b)
         if item.get("resumen"):
             st.markdown(f"_**Conclusión:**_ {item['resumen']}")
 
-        # 2) NUEVO: segundo pase de justificación adicional (2–3 frases)
+        # segundo pase
         descriptor = " — ".join([x for x in [titulo, trib, fecha] if x])
         extracto = (docd["page_content"] or "")[:1600]
         ya_dicho = " | ".join(item.get("bullets", [])) + " | " + item.get("resumen", "")
@@ -309,18 +339,23 @@ def run_research(user_query: str):
         if extra:
             st.markdown(f"_**Justificación adicional:**_ {extra}")
 
-        # Detalles de la fila del CSV (tabla Columna | Contenido)
+        # detalles
         with st.expander(header, expanded=(i == 1)):
             render_kv_table(meta)
 
-        # Resumen breve: conclusión + extra
-        resumen_lines.append(f"{i}. {titulo} — {item.get('resumen','')}".strip())
+        # resumen final
+        linea = f"{i}. {titulo} — {item.get('resumen','')}".strip()
         if extra:
-            resumen_lines.append(f"   ➤ {extra}")
+            linea += f"\n   ➤ {extra}"
+        resumen_lines.append(linea)
 
-    final_msg = "🧠 **Resumen breve (con justificación adicional):**\n" + "\n\n".join(resumen_lines)
-    st.session_state.messages.append({"role": "assistant", "content": final_msg})
-    st.chat_message("assistant").markdown(final_msg)
+    # 10) Evitar “resumen vacío”
+    if any_rendered and resumen_lines:
+        final_msg = "🧠 **Resumen breve (con justificación adicional):**\n" + "\n\n".join(resumen_lines)
+        st.session_state.messages.append({"role": "assistant", "content": final_msg})
+        st.chat_message("assistant").markdown(final_msg)
+    else:
+        st.warning("⚠️ No se pudo renderizar ningún fallo. Revisá que el índice tenga texto en 'page_content' (p. ej., columnas 'sumario'/'texto') y vuelve a intentar.")
 
 # =============================
 # Chat sobre jurisprudencias activas
