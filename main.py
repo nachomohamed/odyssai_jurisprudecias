@@ -16,26 +16,26 @@ st.title("⚖️ Jurisprudencia Assistant")
 OPENAI_KEY = st.secrets["OPENAI_KEY"]
 
 # =============================
-# Estado global de la app
+# Estado global
 # =============================
 if "messages" not in st.session_state:
     st.session_state.messages: List[Dict[str, str]] = []  # [{role, content}]
 if "picked_docs" not in st.session_state:
-    # Guardamos docs elegidos por el LLM como dicts simples: {"metadata": {...}, "page_content": "..."}
+    # docs elegidos por el LLM: [{"metadata": {...}, "page_content": "..."}]
     st.session_state.picked_docs: List[Dict] = []
 if "last_mode" not in st.session_state:
-    st.session_state.last_mode: str = "research"  # informativo
+    st.session_state.last_mode: str = "research"
 
 # =============================
-# LLMs
+# Modelos
 # =============================
-# Router (barato/rápido) para intención
+# Router barato para intención
 router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_KEY)
-# Modelo principal para respuestas/explicaciones
+# Modelo principal
 main_llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=OPENAI_KEY)
 
 # =============================
-# Retriever (MMR, amplia cobertura)
+# Retriever (MMR)
 # =============================
 @st.cache_resource
 def load_retriever():
@@ -48,16 +48,10 @@ def load_retriever():
         embeddings,
         allow_dangerous_deserialization=True
     )
-    # MMR = resultados diversos; pedimos más candidatos
-    retriever = vs.as_retriever(
+    return vs.as_retriever(
         search_type="mmr",
-        search_kwargs={
-            "k": 10,        # devolver hasta 10
-            "fetch_k": 50,  # pool grande para diversidad
-            "lambda_mult": 0.5
-        }
+        search_kwargs={"k": 10, "fetch_k": 50, "lambda_mult": 0.5}
     )
-    return retriever
 
 retriever = load_retriever()
 
@@ -75,11 +69,9 @@ DISPLAY_ORDER = [
 ]
 
 def render_kv_table(meta: dict):
-    """Renderiza tabla 'Columna | Contenido' y pone sumario/texto en expanders."""
     meta = meta or {}
     rows, seen = [], set()
 
-    # Primero columnas clave
     for k in DISPLAY_ORDER:
         if k in meta and meta[k] not in (None, "", "nan"):
             if k in ["sumario", "texto"]:
@@ -87,7 +79,6 @@ def render_kv_table(meta: dict):
             rows.append({"Columna": k, "Contenido": str(meta[k])})
             seen.add(k)
 
-    # Luego el resto de metadata
     for k, v in meta.items():
         if k in seen or k in ["sumario", "texto"]:
             continue
@@ -97,7 +88,6 @@ def render_kv_table(meta: dict):
     if rows:
         st.table(pd.DataFrame(rows))
 
-    # Campos largos en expanders
     if meta.get("sumario"):
         with st.expander("sumario", expanded=True):
             st.write(str(meta["sumario"]))
@@ -105,32 +95,39 @@ def render_kv_table(meta: dict):
         with st.expander("texto", expanded=False):
             st.write(str(meta["texto"]))
 
+def show_active_docs():
+    """Panel con las jurisprudencias activas para poder conversar siempre sobre ellas."""
+    docs = st.session_state.picked_docs
+    if not docs:
+        return
+    with st.expander(f"📚 Jurisprudencias activas ({len(docs)})", expanded=False):
+        for i, d in enumerate(docs, start=1):
+            meta = d["metadata"] or {}
+            titulo = meta.get("caratula") or meta.get("titulo") or f"Jurisprudencia {i}"
+            trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
+            fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
+            header = f"**{titulo}**" + (f" — {trib}" if trib else "") + (f" — {fecha}" if fecha else "")
+            st.markdown(f"{i}. {header}")
+            with st.expander(f"Ver detalles: {titulo}", expanded=False):
+                render_kv_table(meta)
+
 # =============================
 # Router de intención (LLM)
 # =============================
-def classify_intent(user_message: str, history: List[Dict[str, str]]) -> str:
-    """
-    Devuelve 'research' o 'chat' usando LLM y el historial.
-    Si no hay docs previos y dice 'chat', forzamos 'research' después.
-    """
-    # Compactamos historial para el router (últimos 12 intercambios)
-    hist_pairs = []
-    for m in st.session_state.messages[-12:]:
-        hist_pairs.append(f"{m['role']}: {m['content']}")
+def classify_intent(user_message: str) -> str:
+    hist_pairs = [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-12:]]
     history_text = "\n".join(hist_pairs)
 
     system = (
         "You are an intention classifier for a legal assistant. "
-        "Your job is to decide if the user wants to: "
-        "(a) SEARCH/RETRIEVE new jurisprudences (label: research) or "
-        "(b) CHAT/DISCUSS about already retrieved jurisprudences (label: chat). "
-        "Consider the conversation so far. "
-        "Answer with EXACTLY one word: 'research' or 'chat'. No punctuation. No explanations."
+        "Decide if the user wants to SEARCH/RETRIEVE new jurisprudences (label: research), "
+        "or CHAT/DISCUSS about already retrieved jurisprudences (label: chat). "
+        "Return EXACTLY one token: research OR chat."
     )
     user = (
         f"Conversation so far:\n{history_text}\n\n"
         f"New user message:\n{user_message}\n\n"
-        "Return ONLY one token: research OR chat."
+        "Return: research OR chat"
     )
     out = router_llm.invoke([
         {"role": "system", "content": system},
@@ -139,54 +136,56 @@ def classify_intent(user_message: str, history: List[Dict[str, str]]) -> str:
     label = (out.content if hasattr(out, "content") else str(out)).strip().lower()
     if label not in ("research", "chat"):
         label = "research"
-    # Si quiere chatear pero no hay docs elegidos, vamos a research (no hay sobre qué chatear)
     if label == "chat" and not st.session_state.picked_docs:
         label = "research"
     return label
 
 # =============================
-# Research: preparar candidatos y pedir al LLM que elija 3 con explicación
+# Research helpers
 # =============================
 def choose_uid(doc_meta: dict, extract: str) -> str:
-    # UID determinístico en base a descriptor + extracto para evitar duplicados
     titulo = (doc_meta.get("caratula") or doc_meta.get("titulo") or "Jurisprudencia").strip()
     trib = (doc_meta.get("tribunal_principal") or doc_meta.get("tribunal") or "").strip()
     fecha = (doc_meta.get("fecha_sentencia") or doc_meta.get("fecha") or "").strip()
     tipo = (doc_meta.get("tipo_causa") or "").strip()
-    descriptor = " — ".join([x for x in [titulo, trib, fecha, tipo] if x])
-    key = (descriptor + "|" + extract[:200]).strip()
+    descriptor = " ".join([x for x in [titulo, trib, fecha, tipo] if x])
+    key = (descriptor + " | " + extract[:200]).strip()
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
 
-def llm_pick_top3_and_explain(user_query: str, candidates: List[Dict]) -> Tuple[str, List[Dict]]:
+def _distinct_strings(lst: List[str]) -> bool:
+    norm = [(" ".join((s or "").lower().split())) for s in lst]
+    return len(set(norm)) == len(norm)
+
+def llm_pick_top3_and_explain(user_query: str, candidates: List[Dict], retry_hint: str = "") -> Tuple[str, List[Dict]]:
     """
     candidates: [{uid, descriptor, extracto}]
     Devuelve (intro:str, items:list[{uid, bullets, resumen}])
     """
     system = (
         "Eres un asistente jurídico. Recibirás hasta 10 fallos candidatos. "
-        "Debes elegir EXACTAMENTE 3. "
-        "Para cada uno: explica con detalle en viñetas por qué es relevante. "
-        "Incluye hechos clave, artículo/norma (si aparece), jurisdicción/instancia/fecha, y resultado/criterio. "
-        "Añade al menos una cita breve entre comillas (≤12 palabras) del extracto. "
-        "Sé claro y evita frases genéricas. No inventes."
+        "Debes elegir EXACTAMENTE 3. Sé específico y no repitas explicaciones entre casos. "
+        "Para cada fallo: viñetas claras sobre hechos clave, normas/artículos (p. ej. art. 242 LCT si figura), "
+        "jurisdicción/instancia/fecha y resultado/criterio. Incluye al menos una cita corta (≤12 palabras) del extracto. "
+        "No inventes."
     )
     user = (
         f"Consulta del abogado:\n{user_query}\n\n"
         "Fallos candidatos (uid, descriptor, extracto parcial):\n"
         f"{json.dumps(candidates, ensure_ascii=False)}\n\n"
         "TAREA:\n"
-        "1) Selecciona los 3 fallos más relevantes.\n"
-        "2) Para cada uno devuelve viñetas ('• ...') con explicaciones concretas (mínimo 3 bullets). "
-        "   Cierra con una frase-síntesis de por qué es el más adecuado.\n"
-        "3) Devuelve SOLO JSON con este formato:\n"
+        "1) Selecciona los 3 fallos más relevantes (no más ni menos).\n"
+        "2) Devuelve SOLO JSON exacto:\n"
         "{\n"
-        '  "intro": "texto de introducción",\n'
+        '  "intro": "texto",\n'
         '  "items": [\n'
         '    {"uid": "uid1", "bullets": ["• punto 1", "• punto 2", "• punto 3"], "resumen": "frase final"},\n'
-        '    {"uid": "uid2", "bullets": [...], "resumen": "..."},\n'
-        '    {"uid": "uid3", "bullets": [...], "resumen": "..."}\n'
+        '    {"uid": "uid2", "bullets": ["• ..."], "resumen": "..."},\n'
+        '    {"uid": "uid3", "bullets": ["• ..."], "resumen": "..."}\n'
         "  ]\n"
-        "}"
+        "}\n"
+        "Evita bullets genéricos tipo 'coincidencias fácticas y normativas'. "
+        "Cita nombres de partes, artículos o fragmentos reales del extracto cuando ayuden.\n"
+        f"{retry_hint}"
     )
     out = main_llm.invoke([
         {"role": "system", "content": system},
@@ -206,23 +205,37 @@ def llm_pick_top3_and_explain(user_query: str, candidates: List[Dict]) -> Tuple[
             if uid and bullets and resumen:
                 result.append({"uid": uid, "bullets": bullets, "resumen": resumen})
         if len(result) < 3:
-            raise ValueError("Modelo devolvió menos de 3 válidos")
+            raise ValueError("Menos de 3 ítems válidos")
         return intro, result
     except Exception:
-        # Fallback: tomo 3 primeros candidatos con razones genéricas (evitamos quedarnos en blanco)
-        intro = "Analicé tu consulta y seleccioné los fallos que mejor encajan por hechos y normativa."
-        result = [{"uid": c["uid"],
-                   "bullets": [
-                       "• Hechos sustancialmente análogos a los planteados.",
-                       "• El extracto refiere a la norma aplicable y su interpretación.",
-                       "• Criterio/resultado compatible con el objetivo procesal."
-                   ],
-                   "resumen": "Aporta fundamentos útiles para la estrategia del caso."}
-                  for c in candidates[:3]]
-        return intro, result
+        return "", []
+
+# ====== NUEVO: segundo pase de justificación breve y neutral por fallo ======
+def llm_extra_why(user_query: str, descriptor: str, extracto: str, ya_dicho: str = "") -> str:
+    """
+    Pide una justificación adicional breve (2–3 frases) y neutral sobre
+    por qué este fallo es adecuado para el caso, evitando repetir lo ya dicho.
+    """
+    system = (
+        "Eres un asistente jurídico. Redacta una justificación breve (2–3 frases), neutral y profesional, "
+        "respondiendo por qué este fallo es adecuado para el caso planteado. "
+        "Evita repetir literalmente argumentos ya dichos. No inventes."
+    )
+    user = (
+        f"Caso del abogado:\n{user_query}\n\n"
+        f"Fallo:\n{descriptor}\n\n"
+        f"Extracto (contexto real):\n{extracto[:1200]}\n\n"
+        f"Lo ya dicho (para no repetir):\n{ya_dicho}\n\n"
+        "Devuelve solo el párrafo (2–3 frases)."
+    )
+    out = main_llm.invoke([
+        {"role": "system", "content": system},
+        {"role": "user", "content": user}
+    ])
+    return (out.content if hasattr(out, "content") else str(out)).strip()
 
 def run_research(user_query: str):
-    """Ejecuta el pipeline de búsqueda y muestra top-3 con explicaciones."""
+    """Pipeline de búsqueda y render con segundo pase de justificación adicional."""
     try:
         candidate_docs = retriever.get_relevant_documents(user_query)
     except Exception:
@@ -235,7 +248,7 @@ def run_research(user_query: str):
         st.chat_message("assistant").markdown(msg)
         return
 
-    # Preparo candidatos para el LLM
+    # Armar candidatos
     candidates = []
     uid_to_docdict = {}
     for d in candidate_docs[:10]:
@@ -248,20 +261,28 @@ def run_research(user_query: str):
         extracto = (getattr(d, "page_content", "") or "")[:1600]
         uid = choose_uid(meta, extracto)
         candidates.append({"uid": uid, "descriptor": descriptor, "extracto": extracto})
-        uid_to_docdict[uid] = {
-            "metadata": meta,
-            "page_content": getattr(d, "page_content", "") or ""
-        }
+        uid_to_docdict[uid] = {"metadata": meta, "page_content": getattr(d, "page_content", "") or ""}
 
-    # LLM elige 3 y explica
+    # LLM elige 3 y explica (con posible reintento si son muy similares)
     intro, picked = llm_pick_top3_and_explain(user_query, candidates)
-    st.markdown(f"**{intro}**")
+    if not picked or not _distinct_strings([p.get("resumen","") for p in picked]):
+        intro2, picked2 = llm_pick_top3_and_explain(
+            user_query, candidates,
+            retry_hint="ATENCIÓN: en el intento anterior las explicaciones fueron muy parecidas. "
+                       "Ahora asegura diferencias concretas entre los casos (hechos, norma/artículo, "
+                       "resultado, jurisdicción/fecha) usando fragmentos distintos del extracto."
+        )
+        if picked2:
+            intro = intro2 or intro or "Analicé tu consulta y seleccioné los fallos más pertinentes."
+            picked = picked2
 
-    # Guardamos elegidos para el Chat Mode
+    st.markdown(f"**{intro or 'Analicé tu consulta y seleccioné los fallos más pertinentes.'}**")
+
+    # Guardar en estado para chat posterior
     st.session_state.picked_docs = [uid_to_docdict[x["uid"]] for x in picked if x["uid"] in uid_to_docdict]
 
-    # Render
-    resumen_lineas = []
+    # Render resultados + detalles + segundo pase
+    resumen_lines = []
     for i, item in enumerate(picked, start=1):
         uid = item["uid"]
         docd = uid_to_docdict.get(uid)
@@ -273,33 +294,49 @@ def run_research(user_query: str):
         fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
         header = f"**{titulo}**" + (f" — {trib}" if trib else "") + (f" — {fecha}" if fecha else "")
 
+        # 1) explicación principal
         st.markdown(f"**{i}. {titulo}**")
         for b in item.get("bullets", []):
             st.markdown(b)
         if item.get("resumen"):
             st.markdown(f"_**Conclusión:**_ {item['resumen']}")
 
+        # 2) NUEVO: segundo pase de justificación adicional (2–3 frases)
+        descriptor = " — ".join([x for x in [titulo, trib, fecha] if x])
+        extracto = (docd["page_content"] or "")[:1600]
+        ya_dicho = " | ".join(item.get("bullets", [])) + " | " + item.get("resumen", "")
+        extra = llm_extra_why(user_query, descriptor, extracto, ya_dicho)
+        if extra:
+            st.markdown(f"_**Justificación adicional:**_ {extra}")
+
+        # Detalles de la fila del CSV (tabla Columna | Contenido)
         with st.expander(header, expanded=(i == 1)):
             render_kv_table(meta)
 
-        resumen_lineas.append(f"{i}. {titulo} — {item.get('resumen','')}")
+        # Resumen breve: conclusión + extra
+        resumen_lines.append(f"{i}. {titulo} — {item.get('resumen','')}".strip())
+        if extra:
+            resumen_lines.append(f"   ➤ {extra}")
 
-    final_msg = "🧠 **Resumen breve:**\n" + "\n\n".join(resumen_lineas)
+    final_msg = "🧠 **Resumen breve (con justificación adicional):**\n" + "\n\n".join(resumen_lines)
     st.session_state.messages.append({"role": "assistant", "content": final_msg})
     st.chat_message("assistant").markdown(final_msg)
 
 # =============================
-# Chat sobre las jurisprudencias elegidas
+# Chat sobre jurisprudencias activas
 # =============================
 def run_chat(user_message: str):
-    # Contexto armado desde picked_docs
-    if not st.session_state.picked_docs:
-        # Si no hay docs, lo convertimos a research
+    docs = st.session_state.picked_docs
+    if not docs:
+        # si no hay, degradar a research
         return run_research(user_message)
 
-    # Compongo contexto con headers + recortes
+    # mostrar siempre qué jurisprudencias están activas
+    show_active_docs()
+
+    # contexto
     ctx_blocks = []
-    for idx, d in enumerate(st.session_state.picked_docs, start=1):
+    for idx, d in enumerate(docs, start=1):
         meta = d["metadata"] or {}
         titulo = meta.get("caratula") or meta.get("titulo") or f"Jurisprudencia {idx}"
         trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
@@ -314,8 +351,7 @@ def run_chat(user_message: str):
         "Eres un asistente jurídico en MODO CONVERSACIÓN. "
         "Responde exclusivamente usando la jurisprudencia recuperada y listada a continuación. "
         "Si algo no figura en los textos, dilo explícitamente. "
-        "Puedes comparar, resumir, extraer criterios, o redactar borradores (p.ej., demanda o contestación) "
-        "pero siempre basándote en los fallos provistos.\n\n"
+        "Puedes comparar, resumir, o redactar borradores basándote en los fallos provistos.\n\n"
         f"Jurisprudencia disponible:\n{context}"
     )
     out = main_llm.invoke([
@@ -327,46 +363,35 @@ def run_chat(user_message: str):
     st.chat_message("assistant").markdown(answer)
 
 # =============================
-# Zona de mensajes previos (UI)
+# Mostrar historial previo
 # =============================
 for msg in st.session_state.messages:
-    if msg["role"] == "user":
-        st.chat_message("user").markdown(msg["content"])
-    elif msg["role"] == "assistant":
-        st.chat_message("assistant").markdown(msg["content"])
+    st.chat_message(msg["role"]).markdown(msg["content"])
 
 # =============================
-# Opcional: botones utilitarios
+# Entrada de usuario
 # =============================
-cols = st.columns(3)
-with cols[0]:
-    if st.button("🧹 Limpiar conversación", use_container_width=True):
-        st.session_state.messages.clear()
-        st.session_state.picked_docs.clear()
-        st.session_state.last_mode = "research"
-        st.experimental_rerun()
-with cols[1]:
-    if st.button("🔎 Forzar nueva búsqueda", use_container_width=True):
-        st.session_state.last_mode = "research"
-        st.session_state.messages.append({"role": "assistant", "content": "Entendido. ¿Sobre qué tema busco nueva jurisprudencia?"})
-        st.experimental_rerun()
-
-# =============================
-# Entrada del usuario
-# =============================
-user_input = st.chat_input("Escribí tu mensaje (puede ser 'buscá...', 'compará...', 'resumí...', 'redactá...', etc.)")
+user_input = st.chat_input("Escribí tu mensaje (p. ej., 'buscá...', 'compará...', 'resumí...', 'redactá...')")
 if user_input:
+    # mostrar el mensaje del usuario inmediatamente
     st.session_state.messages.append({"role": "user", "content": user_input})
+    st.chat_message("user").markdown(user_input)
 
-    # 1) Clasificación de intención (LLM)
-    intent = classify_intent(user_input, st.session_state.messages)
-    st.session_state.last_mode = intent  # informativo en el estado
+    # clasificar intención por LLM
+    intent = classify_intent(user_input)
+    st.session_state.last_mode = intent
 
-    # 2) Ejecución según intención
+    # ejecutar modo correspondiente
     if intent == "research":
         run_research(user_input)
     else:
         run_chat(user_input)
+
+# =============================
+# Siempre visible: jurisprudencias activas (si hay)
+# =============================
+show_active_docs()
+
 
 # =============================
 # Nota:
