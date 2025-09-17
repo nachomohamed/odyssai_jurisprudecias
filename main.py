@@ -1,11 +1,24 @@
-# app.py
+# main.py
 import json
 import uuid
 import pandas as pd
 import streamlit as st
 from typing import List, Dict, Tuple
+
+# LLM / Embeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+
+# Estructuras y validación
+from pydantic import BaseModel, Field, constr
+from typing import List as TList
+
+# Postgres / pgvector
+import psycopg2
+from pgvector.psycopg2 import register_vector
+
+# LangChain docs
+from langchain_core.documents import Document
+
 
 # =============================
 # Configuración base
@@ -14,6 +27,8 @@ st.set_page_config(page_title="⚖️ Jurisprudencia Assistant", layout="wide")
 st.title("⚖️ Jurisprudencia Assistant")
 
 OPENAI_KEY = st.secrets["OPENAI_KEY"]
+PG_DSN     = st.secrets["PG_DSN"]
+
 
 # =============================
 # Estado global
@@ -26,6 +41,7 @@ if "picked_docs" not in st.session_state:
 if "last_mode" not in st.session_state:
     st.session_state.last_mode: str = "research"
 
+
 # =============================
 # Modelos
 # =============================
@@ -34,26 +50,91 @@ router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENA
 # Modelo principal
 main_llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=OPENAI_KEY)
 
+
 # =============================
-# Retriever (MMR)
+# Retriever (Postgres + pgvector)
 # =============================
+class PgRetriever:
+    """
+    Retriever que consulta directamente Postgres (pgvector) en tus tablas:
+      - juris."JURIS_CHUNKS" (EMBEDDING vector)
+      - juris."JURISPRUDENCES" (metadatos)
+    Ajustá nombres de columnas/tabla si difieren.
+    """
+    def __init__(self, dsn: str, embeddings: OpenAIEmbeddings, default_k: int = 10, default_fetch_k: int = 50):
+        self.dsn = dsn
+        self.embeddings = embeddings
+        self.default_k = default_k
+        self.default_fetch_k = default_fetch_k
+
+    def get_relevant_documents(self, query: str, k: int = None, fetch_k: int = None) -> List[Document]:
+        k = k or self.default_k
+        fetch_k = fetch_k or self.default_fetch_k
+
+        # 1) embed de la consulta (usar MISMO modelo que en indexado)
+        qvec = self.embeddings.embed_query(query)
+
+        # 2) KNN en Postgres usando operador <-> de pgvector
+        sql = """
+        SELECT
+            c.doc_id,
+            c.section,
+            c.chunk                              AS page_content,
+            p.caratula,
+            p.tribunal_principal,
+            p.tribunal_sala,
+            p.tipo_causa,
+            p.nro_expediente,
+            p.nro_sentencia,
+            p.registro,
+            p.fecha_sentencia
+        FROM juris."JURIS_CHUNKS" c
+        JOIN juris."JURISPRUDENCES" p ON p.doc_id = c.doc_id
+        ORDER BY c.embedding <-> %s
+        LIMIT %s;
+        """
+
+        docs: List[Document] = []
+        with psycopg2.connect(self.dsn) as conn:
+            register_vector(conn)
+            with conn.cursor() as cur:
+                cur.execute(sql, (qvec, fetch_k))
+                rows = cur.fetchall()
+                cols = [d.name for d in cur.description]
+
+        # 3) armar LangChain Documents
+        for r in rows[:k]:
+            row = dict(zip(cols, r))
+            meta: Dict = {
+                "caratula": row.get("caratula"),
+                "tribunal_principal": row.get("tribunal_principal"),
+                "tribunal_sala": row.get("tribunal_sala"),
+                "tipo_causa": row.get("tipo_causa"),
+                "nro_expediente": row.get("nro_expediente"),
+                "nro_sentencia": row.get("nro_sentencia"),
+                "registro": row.get("registro"),
+                "fecha_sentencia": row.get("fecha_sentencia"),
+                "doc_id": row.get("doc_id"),
+                "section": row.get("section")
+            }
+            docs.append(Document(page_content=row.get("page_content") or "", metadata=meta))
+        return docs
+
+    # compat mínima con vs.as_retriever(...)
+    def as_retriever(self, **kwargs):
+        return self
+
+
 @st.cache_resource
-def load_retriever():
+def load_retriever_pg():
     embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",   # Debe coincidir con el usado al indexar FAISS
+        model="text-embedding-3-small",  # MISMO modelo usado al indexar
         openai_api_key=OPENAI_KEY
     )
-    vs = FAISS.load_local(
-        "vectorstore_jurisprudencia",
-        embeddings,
-        allow_dangerous_deserialization=True
-    )
-    return vs.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 10, "fetch_k": 50, "lambda_mult": 0.5}
-    )
+    return PgRetriever(PG_DSN, embeddings)
 
-retriever = load_retriever()
+retriever = load_retriever_pg()
+
 
 # =============================
 # Helpers UI
@@ -112,6 +193,7 @@ def show_active_docs():
             with st.expander(f"Ver detalles: {titulo}", expanded=False):
                 render_kv_table(meta)
 
+
 # =============================
 # Router de intención (LLM)
 # =============================
@@ -141,6 +223,22 @@ def classify_intent(user_message: str) -> str:
         label = "research"
     return label
 
+
+# =============================
+# Esquema estructurado para Top-3
+# =============================
+class PickItem(BaseModel):
+    uid: constr(strip_whitespace=True, min_length=1)
+    bullets: TList[constr(strip_whitespace=True, min_length=1)] = Field(
+        ..., description="Viñetas concretas (hechos, normas/art, jurisdicción/fecha, resultado)"
+    )
+    resumen: constr(strip_whitespace=True, min_length=1)
+
+class Top3Response(BaseModel):
+    intro: constr(strip_whitespace=True, min_length=1)
+    items: TList[PickItem] = Field(..., min_items=3, max_items=3)
+
+
 # =============================
 # Research helpers
 # =============================
@@ -159,9 +257,12 @@ def _distinct_strings(lst: List[str]) -> bool:
 
 def llm_pick_top3_and_explain(user_query: str, candidates: List[Dict], retry_hint: str = "") -> Tuple[str, List[Dict]]:
     """
-    candidates: [{uid, descriptor, extracto}]
-    Devuelve (intro:str, items:list[{uid, bullets, resumen}])
+    Usa un esquema Pydantic para obligar a devolver JSON válido con EXACTAMENTE 3 ítems.
+    Con fallback a JSON mode si el proveedor no respeta del todo el esquema.
     """
+    # 1) Modelo estructurado (JSON validado contra Top3Response)
+    structured_llm = main_llm.with_structured_output(Top3Response)
+
     system = (
         "Eres un asistente jurídico. Recibirás hasta 10 fallos candidatos. "
         "Debes elegir EXACTAMENTE 3. Sé específico y no repitas explicaciones entre casos. "
@@ -175,61 +276,51 @@ def llm_pick_top3_and_explain(user_query: str, candidates: List[Dict], retry_hin
         f"{json.dumps(candidates, ensure_ascii=False)}\n\n"
         "TAREA:\n"
         "1) Selecciona los 3 fallos más relevantes (no más ni menos).\n"
-        "2) Devuelve SOLO JSON exacto:\n"
-        "{\n"
-        '  "intro": "texto",\n'
-        '  "items": [\n'
-        '    {"uid": "uid1", "bullets": ["• punto 1", "• punto 2", "• punto 3"], "resumen": "frase final"},\n'
-        '    {"uid": "uid2", "bullets": ["• ..."], "resumen": "..."},\n'
-        '    {"uid": "uid3", "bullets": ["• ..."], "resumen": "..."}\n'
-        "  ]\n"
-        "}\n"
-        "Evita bullets genéricos tipo 'coincidencias fácticas y normativas'. "
-        "Cita nombres de partes, artículos o fragmentos reales del extracto cuando ayuden.\n"
+        "2) Devuelve un objeto con 'intro' y 'items' (exactamente 3), "
+        "   donde cada item tiene 'uid', 'bullets' (lista) y 'resumen'.\n"
         f"{retry_hint}"
     )
-    out = main_llm.invoke([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user}
-    ])
-    text = out.content if hasattr(out, "content") else str(out)
 
     try:
-        data = json.loads(text)
-        intro = (data.get("intro") or "").strip()
-        items = data.get("items") or []
-        result = []
-        for it in items[:3]:
-            uid = (it.get("uid") or "").strip()
-            bullets = it.get("bullets") or []
-            resumen = (it.get("resumen") or "").strip()
-            if uid and bullets and resumen:
-                result.append({"uid": uid, "bullets": bullets, "resumen": resumen})
-        if len(result) < 3:
-            raise ValueError("Menos de 3 ítems válidos")
+        parsed: Top3Response = structured_llm.invoke([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ])
+        intro = parsed.intro.strip()
+        result = [{"uid": it.uid, "bullets": it.bullets, "resumen": it.resumen} for it in parsed.items]
         return intro, result
-    except Exception:
-        return "", []
 
-# ====== Segundo pase de justificación breve y neutral por fallo ======
-def llm_extra_why(user_query: str, descriptor: str, extracto: str, ya_dicho: str = "") -> str:
-    system = (
-        "Eres un asistente jurídico. Redacta una justificación breve (2–3 frases), neutral y profesional, "
-        "respondiendo por qué este fallo es adecuado para el caso planteado. "
-        "Evita repetir literalmente argumentos ya dichos. No inventes."
-    )
-    user = (
-        f"Caso del abogado:\n{user_query}\n\n"
-        f"Fallo:\n{descriptor}\n\n"
-        f"Extracto (contexto real):\n{extracto[:1200]}\n\n"
-        f"Lo ya dicho (para no repetir):\n{ya_dicho}\n\n"
-        "Devuelve solo el párrafo (2–3 frases)."
-    )
-    out = main_llm.invoke([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user}
-    ])
-    return (out.content if hasattr(out, "content") else str(out)).strip()
+    except Exception:
+        # Fallback: “JSON mode” + validación manual
+        json_mode_llm = ChatOpenAI(
+            model=main_llm.model,
+            temperature=main_llm.temperature,
+            openai_api_key=OPENAI_KEY,
+            model_kwargs={"response_format": {"type": "json_object"}}
+        )
+        out = json_mode_llm.invoke([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ])
+        text = out.content if hasattr(out, "content") else str(out)
+
+        try:
+            data = json.loads(text)
+            intro = (data.get("intro") or "").strip()
+            items = (data.get("items") or [])[:3]
+            result = []
+            for it in items:
+                uid = (it.get("uid") or "").strip()
+                bullets = it.get("bullets") or []
+                resumen = (it.get("resumen") or "").strip()
+                if uid and bullets and resumen:
+                    result.append({"uid": uid, "bullets": bullets, "resumen": resumen})
+            if len(result) != 3 or not intro:
+                raise ValueError("Esquema incompleto en fallback")
+            return intro, result
+        except Exception:
+            return "", []
+
 
 # =============================
 # Research con diagnósticos y fallbacks
@@ -240,12 +331,12 @@ def run_research(user_query: str):
     try:
         candidate_docs = retriever.get_relevant_documents(user_query)
     except Exception as e:
-        st.error(f"❌ Error al recuperar documentos del vectorstore: {e}")
+        st.error(f"❌ Error al recuperar documentos desde Postgres: {e}")
         return
 
     # 1) Si no hay candidatos, avisar
     if not candidate_docs:
-        st.warning("⚠️ No encontré jurisprudencias relevantes. Verificá que el índice FAISS tenga contenido y que la consulta sea específica (hechos, norma, jurisdicción, período).")
+        st.warning("⚠️ No encontré jurisprudencias relevantes. Verificá que la DB tenga contenido y que la consulta sea específica (hechos, norma, jurisdicción, período).")
         return
 
     # 2) Diagnóstico visible (primeros 10 títulos)
@@ -273,11 +364,13 @@ def run_research(user_query: str):
         candidates.append({"uid": uid, "descriptor": descriptor, "extracto": extracto})
         uid_to_docdict[uid] = {"metadata": meta, "page_content": getattr(d, "page_content", "") or ""}
 
-    # 4) LLM elige 3
+    # 4) LLM elige 3 (estructurado)
     intro, picked = llm_pick_top3_and_explain(user_query, candidates)
 
     # 5) Reintento si vienen vacíos o muy parecidos
-    if not picked or not _distinct_strings([p.get("resumen","") for p in picked]):
+    def _get_resumenes(ps: List[Dict]) -> List[str]:
+        return [p.get("resumen", "") for p in ps]
+    if not picked or not _distinct_strings(_get_resumenes(picked)):
         intro2, picked2 = llm_pick_top3_and_explain(
             user_query, candidates,
             retry_hint="ATENCIÓN: explicaciones muy parecidas o vacías. Asegura diferencias concretas entre los casos (hechos, norma/artículo, resultado, jurisdicción/fecha) y usa fragmentos distintos del extracto."
@@ -331,7 +424,7 @@ def run_research(user_query: str):
         if item.get("resumen"):
             st.markdown(f"_**Conclusión:**_ {item['resumen']}")
 
-        # segundo pase
+        # segundo pase (justificación breve adicional)
         descriptor = " — ".join([x for x in [titulo, trib, fecha] if x])
         extracto = (docd["page_content"] or "")[:1600]
         ya_dicho = " | ".join(item.get("bullets", [])) + " | " + item.get("resumen", "")
@@ -355,7 +448,29 @@ def run_research(user_query: str):
         st.session_state.messages.append({"role": "assistant", "content": final_msg})
         st.chat_message("assistant").markdown(final_msg)
     else:
-        st.warning("⚠️ No se pudo renderizar ningún fallo. Revisá que el índice tenga texto en 'page_content' (p. ej., columnas 'sumario'/'texto') y vuelve a intentar.")
+        st.warning("⚠️ No se pudo renderizar ningún fallo. Revisá que la DB tenga texto en 'page_content' (p. ej., columnas 'sumario'/'texto') y vuelve a intentar.")
+
+
+# ====== Segundo pase de justificación breve y neutral por fallo ======
+def llm_extra_why(user_query: str, descriptor: str, extracto: str, ya_dicho: str = "") -> str:
+    system = (
+        "Eres un asistente jurídico. Redacta una justificación breve (2–3 frases), neutral y profesional, "
+        "respondiendo por qué este fallo es adecuado para el caso planteado. "
+        "Evita repetir literalmente argumentos ya dichos. No inventes."
+    )
+    user = (
+        f"Caso del abogado:\n{user_query}\n\n"
+        f"Fallo:\n{descriptor}\n\n"
+        f"Extracto (contexto real):\n{extracto[:1200]}\n\n"
+        f"Lo ya dicho (para no repetir):\n{ya_dicho}\n\n"
+        "Devuelve solo el párrafo (2–3 frases)."
+    )
+    out = main_llm.invoke([
+        {"role": "system", "content": system},
+        {"role": "user", "content": user}
+    ])
+    return (out.content if hasattr(out, "content") else str(out)).strip()
+
 
 # =============================
 # Chat sobre jurisprudencias activas
@@ -397,11 +512,13 @@ def run_chat(user_message: str):
     st.session_state.messages.append({"role": "assistant", "content": answer})
     st.chat_message("assistant").markdown(answer)
 
+
 # =============================
 # Mostrar historial previo
 # =============================
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).markdown(msg["content"])
+
 
 # =============================
 # Entrada de usuario
@@ -422,6 +539,7 @@ if user_input:
     else:
         run_chat(user_input)
 
+
 # =============================
 # Siempre visible: jurisprudencias activas (si hay)
 # =============================
@@ -430,9 +548,7 @@ show_active_docs()
 
 # =============================
 # Nota:
-# - Este código asume que tu vectorstore FAISS ya existe en 'vectorstore_jurisprudencia'
-#   con documentos que contienen en page_content el texto del fallo y, si es posible,
-#   metadata como 'caratula', 'tribunal_principal', 'fecha_sentencia', etc.
-# - Si querés ajustar el umbral de similitud o filtros por jurisdicción/año,
-#   podés crear el retriever con: vs.as_retriever(search_kwargs={"k": 3, "score_threshold": 0.2})
+# - Este código consulta Postgres (pgvector) directamente como fuente única.
+# - Asegurate de haber creado la extensión vector: CREATE EXTENSION IF NOT EXISTS vector;
+# - El modelo de embeddings debe coincidir con el usado al indexar.
 # =============================
