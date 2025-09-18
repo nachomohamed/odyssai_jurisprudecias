@@ -5,3 +5,8 @@ langchain-community
 openai
 python-dotenv
 faiss-cpu
+psycopg2-binary
+pgvector
+SQLAlchemy
+pydantic
+pandas
