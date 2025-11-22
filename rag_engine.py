@@ -35,12 +35,37 @@ except Exception:
     pass # Si falla (ej: no estamos en streamlit), confiamos en que ya esté en env vars
 
 # =====================================
+# METADATA LISTS (Dynamic Loading)
+# =====================================
+import json
+
+METADATA_JSON_PATH = 'metadata_values.json'
+
+def load_metadata_lists():
+    try:
+        if os.path.exists(METADATA_JSON_PATH):
+            with open(METADATA_JSON_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('tribunales', []), data.get('salas', [])
+    except Exception as e:
+        print(f"Error cargando metadatos desde JSON: {e}")
+    return [], []
+
+TRIBUNALES, SALAS = load_metadata_lists()
+
+# Fallback si están vacíos (para evitar errores en Pydantic si no hay JSON)
+if not TRIBUNALES:
+    TRIBUNALES = ["Corte Suprema de Justicia", "Cámara Civil y Comercial"] # Mínimo default
+if not SALAS:
+    SALAS = ["Sala I", "Sala II"] # Mínimo default
+
+# =====================================
 # MODELS (Pydantic)
 # =====================================
 class SearchFilters(BaseModel):
-    tribunal: Optional[str] = Field(None, description="Tribunal específico, ej: 'Corte Suprema', 'Cámara Civil'")
-    sala: Optional[str] = Field(None, description="Sala específica, ej: 'Sala I', 'Sala 2'")
-    tipo_causa: Optional[str] = Field(None, description="Tipo de causa, ej: 'Despido', 'Accidente'")
+    tribunal: Optional[str] = Field(None, description=f"Tribunal específico. Opciones válidas: {TRIBUNALES}")
+    sala: Optional[str] = Field(None, description=f"Sala específica. Opciones válidas: {SALAS}")
+    tipo_causa: Optional[str] = Field(None, description="Tipo de causa, ej: 'Despido', 'Accidente', 'Amparo'. (Usar términos generales)")
     anio_min: Optional[int] = Field(None, description="Año de inicio del rango (o año exacto). Ej: 2010")
     anio_max: Optional[int] = Field(None, description="Año de fin del rango. Ej: 2020")
 
@@ -72,17 +97,19 @@ llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
 # Usamos with_structured_output para forzar el JSON schema
 analyzer_llm = llm.with_structured_output(QueryAnalysis)
 
-system_analysis = """
+system_analysis = f"""
 Sos un asistente inteligente que clasifica la intención del usuario en un sistema legal.
 
 1. Determinar la INTENCIÓN (intent):
    - "SEARCH": Si el usuario pide buscar fallos, sentencias, jurisprudencia, casos parecidos, o da criterios específicos.
-   - "CHAT": Si el usuario saluda, hace preguntas teóricas generales, pide redactar un escrito SIN buscar casos específicos, o conversa sobre lo que ya se mostró.
+     **IMPORTANTE:** Si el usuario dice "hace una búsqueda más general", "busca de nuevo", "probá con otros términos", TAMBIÉN es "SEARCH" (con filtros más amplios o sin filtros).
+   - "CHAT": SOLO si el usuario saluda, hace preguntas teóricas generales SIN intención de buscar casos, o pide redactar un escrito genérico.
 
-2. Si es "SEARCH", extraer filtros (tribunal, sala, tipo_causa, anio_min, anio_max) y definir la "search_query".
-   - Si pide "del año 2015", anio_min=2015, anio_max=2015.
-   - Si pide "entre 2010 y 2020", anio_min=2010, anio_max=2020.
-   - Si pide "después de 2018", anio_min=2019.
+2. Si es "SEARCH", extraer filtros y definir la "search_query".
+   - TRIBUNALES VÁLIDOS: {TRIBUNALES}
+   - SALAS VÁLIDAS: {SALAS}
+   - Si el usuario menciona un tribunal o sala parecido, MAPEARLO a uno de la lista. Si no coincide, dejar None.
+   - Fechas: "entre 2010 y 2020" -> anio_min=2010, anio_max=2020.
 """
 
 analysis_prompt = ChatPromptTemplate.from_messages([
@@ -112,13 +139,13 @@ rag_chain = rag_prompt | llm | StrOutputParser()
 
 # --- Chat Response Chain ---
 chat_system_prompt = """
-Sos un asistente virtual para abogados. 
+Sos un asistente virtual para abogados con acceso a una base de datos de jurisprudencia local.
 Tu tono es profesional, conciso y técnico.
 
 Tus objetivos:
 1. Ayudar en la redacción, brainstorming o dudas teóricas.
-2. NO desviarte del tema legal. Si te preguntan de cocina o deportes, cortésmente volvé al derecho.
-3. Si el usuario pide buscar fallos, sugerile que sea específico con los términos.
+2. Si el usuario te pide buscar fallos y NO encontraste nada antes, sugerile términos de búsqueda alternativos.
+3. **NUNCA digas que no tienes acceso a bases de datos.** Tienes una base interna. Si no encontraste nada, di "No encontré resultados en mi base de datos interna para esa consulta".
 """
 
 chat_prompt = ChatPromptTemplate.from_messages([
@@ -197,8 +224,11 @@ def build_query_filters(filters):
         conditions.append({"tribunal_principal": filters["tribunal"]})
     if filters.get("sala"):
         conditions.append({"tribunal_sala": filters["sala"]})
-    if filters.get("tipo_causa"):
-        conditions.append({"tipo_causa": filters["tipo_causa"]})
+    # REMOVED: tipo_causa is too strict for metadata filtering. 
+    # We rely on vector search for the topic.
+    # if filters.get("tipo_causa"):
+    #    conditions.append({"tipo_causa": filters["tipo_causa"]})
+    
     # REMOVED: anio filter causing crash with $contains
     
     if not conditions:
