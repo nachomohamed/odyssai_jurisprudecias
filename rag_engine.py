@@ -137,8 +137,10 @@ def analyze_query(user_query: str) -> Dict[str, Any]:
     Usa LangChain para analizar la query.
     Retorna dict compatible con la app: {"intent":..., "filters":..., "search_query":...}
     """
+    print(f"--- [DEBUG] Analizando query: '{user_query}' ---")
     try:
         result: QueryAnalysis = analysis_chain.invoke({"input": user_query})
+        print(f"--- [DEBUG] Resultado análisis: Intent={result.intent}, Filters={result.filters} ---")
         # Convertimos a dict simple para facilitar uso en app
         return {
             "intent": result.intent,
@@ -220,30 +222,39 @@ def rerank(query, docs):
         return list(range(len(docs))), [1.0] * len(docs)
 
 def search(col, query, filters=None, k=3):
+    print(f"--- [DEBUG] Inicio de búsqueda. Query: '{query}' ---")
+    print(f"--- [DEBUG] Filtros recibidos: {filters} ---")
+    
     # 1. Construir filtros para Chroma (excluyendo año)
     where = build_query_filters(filters) if filters else None
+    print(f"--- [DEBUG] Filtros Chroma (where): {where} ---")
     
     # 2. Traer más resultados para filtrar después
     # Si hay filtro de año, traemos más para compensar los que descartaremos
     has_year_filter = filters and (filters.get("anio_min") or filters.get("anio_max"))
     fetch_k = k * 10 if has_year_filter else (k * 5 if USE_RERANK else k)
+    print(f"--- [DEBUG] Fetch K: {fetch_k} (Rerank: {USE_RERANK}, YearFilter: {has_year_filter}) ---")
     
+    print("--- [DEBUG] Ejecutando col.query en Chroma... ---")
     results = col.query(
         query_texts=[query],
         n_results=fetch_k,
         where=where
     )
+    print("--- [DEBUG] Chroma retornó resultados. Procesando... ---")
     
     docs = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
     ids = results.get("ids", [[]])[0]
     
     items = [{"id": i, "texto": d, "metadata": m} for i, d, m in zip(ids, docs, metadatas)]
+    print(f"--- [DEBUG] Items recuperados de Chroma: {len(items)} ---")
     
     # 3. Filtrado Manual por Año (Post-processing)
     if has_year_filter:
         min_y = filters.get("anio_min")
         max_y = filters.get("anio_max")
+        print(f"--- [DEBUG] Aplicando filtro de año: Min={min_y}, Max={max_y} ---")
         
         filtered_items = []
         import re
@@ -268,15 +279,19 @@ def search(col, query, filters=None, k=3):
                 # Si no encontramos fecha, decidimos si incluirlo o no. 
                 # Por defecto, si el usuario pide fecha específica, mejor excluir los que no tienen fecha.
                 pass
-                
+        
+        print(f"--- [DEBUG] Items después de filtro de año: {len(filtered_items)} ---")
         items = filtered_items
     
     if not items:
+        print("--- [DEBUG] No quedaron items después del filtrado. ---")
         return []
 
     # 4. Reranking
     if USE_RERANK:
+        print("--- [DEBUG] Iniciando Reranking... ---")
         idxs, scores = rerank(query, [x["texto"] for x in items])
+        print("--- [DEBUG] Reranking finalizado. ---")
         ranked_items = []
         for pos, idx in enumerate(idxs[:k]):
             item = items[idx].copy()
