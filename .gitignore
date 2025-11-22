@@ -75,5 +75,7 @@ Thumbs.db
 openai_api_key.txt
 *.ipynb
 /converted_txt
+/converted_csv
+/converted_docx
 secrets.toml
 *.csv
