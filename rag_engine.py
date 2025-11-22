@@ -41,7 +41,8 @@ class SearchFilters(BaseModel):
     tribunal: Optional[str] = Field(None, description="Tribunal específico, ej: 'Corte Suprema', 'Cámara Civil'")
     sala: Optional[str] = Field(None, description="Sala específica, ej: 'Sala I', 'Sala 2'")
     tipo_causa: Optional[str] = Field(None, description="Tipo de causa, ej: 'Despido', 'Accidente'")
-    anio: Optional[int] = Field(None, description="Año numérico de interés, ej: 2023")
+    anio_min: Optional[int] = Field(None, description="Año de inicio del rango (o año exacto). Ej: 2010")
+    anio_max: Optional[int] = Field(None, description="Año de fin del rango. Ej: 2020")
 
 class QueryAnalysis(BaseModel):
     intent: str = Field(..., description="Intención del usuario: 'SEARCH' (buscar fallos) o 'CHAT' (conversación general).")
@@ -78,7 +79,10 @@ Sos un asistente inteligente que clasifica la intención del usuario en un siste
    - "SEARCH": Si el usuario pide buscar fallos, sentencias, jurisprudencia, casos parecidos, o da criterios específicos.
    - "CHAT": Si el usuario saluda, hace preguntas teóricas generales, pide redactar un escrito SIN buscar casos específicos, o conversa sobre lo que ya se mostró.
 
-2. Si es "SEARCH", extraer filtros (tribunal, sala, tipo_causa, anio) y definir la "search_query".
+2. Si es "SEARCH", extraer filtros (tribunal, sala, tipo_causa, anio_min, anio_max) y definir la "search_query".
+   - Si pide "del año 2015", anio_min=2015, anio_max=2015.
+   - Si pide "entre 2010 y 2020", anio_min=2010, anio_max=2020.
+   - Si pide "después de 2018", anio_min=2019.
 """
 
 analysis_prompt = ChatPromptTemplate.from_messages([
@@ -193,9 +197,8 @@ def build_query_filters(filters):
         conditions.append({"tribunal_sala": filters["sala"]})
     if filters.get("tipo_causa"):
         conditions.append({"tipo_causa": filters["tipo_causa"]})
-    if filters.get("anio"):
-        conditions.append({"fecha_sentencia": {"$contains": str(filters["anio"])}})
-
+    # REMOVED: anio filter causing crash with $contains
+    
     if not conditions:
         return None
     if len(conditions) == 1:
@@ -217,8 +220,13 @@ def rerank(query, docs):
         return list(range(len(docs))), [1.0] * len(docs)
 
 def search(col, query, filters=None, k=3):
+    # 1. Construir filtros para Chroma (excluyendo año)
     where = build_query_filters(filters) if filters else None
-    fetch_k = k * 5 if USE_RERANK else k
+    
+    # 2. Traer más resultados para filtrar después
+    # Si hay filtro de año, traemos más para compensar los que descartaremos
+    has_year_filter = filters and (filters.get("anio_min") or filters.get("anio_max"))
+    fetch_k = k * 10 if has_year_filter else (k * 5 if USE_RERANK else k)
     
     results = col.query(
         query_texts=[query],
@@ -232,9 +240,41 @@ def search(col, query, filters=None, k=3):
     
     items = [{"id": i, "texto": d, "metadata": m} for i, d, m in zip(ids, docs, metadatas)]
     
+    # 3. Filtrado Manual por Año (Post-processing)
+    if has_year_filter:
+        min_y = filters.get("anio_min")
+        max_y = filters.get("anio_max")
+        
+        filtered_items = []
+        import re
+        
+        for item in items:
+            # Intentar extraer año de la fecha (asumiendo formato DD/MM/YYYY o YYYY)
+            fecha_str = str(item["metadata"].get("fecha_sentencia", ""))
+            
+            # Buscar 4 dígitos seguidos que parezcan un año (19xx o 20xx)
+            match = re.search(r'(19|20)\d{2}', fecha_str)
+            if match:
+                year = int(match.group(0))
+                
+                # Aplicar rango
+                if min_y and year < min_y:
+                    continue
+                if max_y and year > max_y:
+                    continue
+                
+                filtered_items.append(item)
+            else:
+                # Si no encontramos fecha, decidimos si incluirlo o no. 
+                # Por defecto, si el usuario pide fecha específica, mejor excluir los que no tienen fecha.
+                pass
+                
+        items = filtered_items
+    
     if not items:
         return []
 
+    # 4. Reranking
     if USE_RERANK:
         idxs, scores = rerank(query, [x["texto"] for x in items])
         ranked_items = []
