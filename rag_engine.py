@@ -20,6 +20,21 @@ OPENAI_MODEL = "gpt-4o-mini"
 USE_RERANK = True
 
 # =====================================
+# API KEY SETUP
+# =====================================
+try:
+    import streamlit as st
+    # Intentar cargar desde secrets si no está en variables de entorno
+    if "OPENAI_API_KEY" not in os.environ:
+        # El usuario indicó que se llama "OPENAI_KEY" en sus secrets
+        if "OPENAI_KEY" in st.secrets:
+            os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_KEY"]
+        elif "OPENAI_API_KEY" in st.secrets:
+            os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+except Exception:
+    pass # Si falla (ej: no estamos en streamlit), confiamos en que ya esté en env vars
+
+# =====================================
 # MODELS (Pydantic)
 # =====================================
 class SearchFilters(BaseModel):
