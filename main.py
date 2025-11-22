@@ -1,5 +1,39 @@
 import streamlit as st
 import rag_engine
+import os
+import gdown
+
+# =====================================
+# DEPLOYMENT CONFIG
+# =====================================
+# ID del archivo en Google Drive (proporcionado por el usuario)
+FILE_ID = '10J4VsnOel0Njd_mkUsJZ9kMqo8JQ3O1r'
+# Ruta donde ChromaDB espera encontrar la base de datos
+DB_PATH = 'chroma_juris/chroma.sqlite3'
+
+@st.cache_resource
+def download_db_if_missing():
+    """Descarga la base de datos desde Google Drive si no existe localmente."""
+    if not os.path.exists(DB_PATH):
+        with st.spinner("Descargando base de datos de jurisprudencia (3.3GB)... esto puede tardar unos minutos."):
+            try:
+                # Asegurar que el directorio exista
+                os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+                
+                url = f'https://drive.google.com/uc?id={FILE_ID}'
+                # quiet=False para ver progreso en logs si es necesario
+                gdown.download(url, DB_PATH, quiet=False)
+                st.success("Base de datos descargada correctamente.")
+            except Exception as e:
+                st.error(f"Error descargando la base de datos: {e}")
+                # Intentar limpiar si falló
+                if os.path.exists(DB_PATH):
+                    os.remove(DB_PATH)
+    else:
+        print("Base de datos encontrada localmente.")
+
+# Ejecutar descarga antes de cualquier otra cosa
+download_db_if_missing()
 
 # =====================================
 # PAGE CONFIG

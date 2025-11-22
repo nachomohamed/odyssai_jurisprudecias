@@ -64,6 +64,7 @@ coverage.xml
 *.db
 *.sqlite3
 data/
+chroma_juris/
 
 # OS files
 .DS_Store

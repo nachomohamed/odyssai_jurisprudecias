@@ -35,3 +35,4 @@ tenacity>=8.2.3,<9,!=8.4.0
 
 # Frontend
 streamlit
+gdown
