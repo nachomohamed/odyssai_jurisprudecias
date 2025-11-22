@@ -14,7 +14,7 @@ torch>=2.2,<3.0          # CPU; si tenés CUDA, podés instalar torch con la bui
 
 # Vector DB
 chromadb==0.5.5
-faiss-cpu==1.8.0.post1
+
 
 # LangChain (núcleo + proveedores)
 langchain==0.2.16
