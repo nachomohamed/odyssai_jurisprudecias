@@ -299,9 +299,14 @@ def rerank(query, docs):
     except Exception:
         return list(range(len(docs))), [1.0] * len(docs)
 
-def search(col, query, filters=None, k=3):
+def sigmoid(x):
+    import numpy as np
+    return 1 / (1 + np.exp(-x))
+
+def search(col, query, filters=None, k=3, min_relevance=0.0):
     print(f"--- [DEBUG] Inicio de búsqueda. Query: '{query}' ---")
     print(f"--- [DEBUG] Filtros recibidos: {filters} ---")
+    print(f"--- [DEBUG] Min Relevance: {min_relevance} ---")
     
     # 1. Construir filtros para Chroma (excluyendo año)
     where = build_query_filters(filters) if filters else None
@@ -384,11 +389,19 @@ def search(col, query, filters=None, k=3):
         idxs, scores = rerank(query, [x["texto"] for x in items_to_rerank])
         print("--- [DEBUG] Reranking finalizado. ---")
         ranked_items = []
-        for pos, idx in enumerate(idxs[:k]):
+        for pos, idx in enumerate(idxs):
             if idx < len(items_to_rerank):
                 item = items_to_rerank[idx].copy()
-                item["score"] = float(scores[pos])
-                ranked_items.append(item)
-        return ranked_items
+                # Normalizar score a probabilidad (0-1) usando sigmoide
+                raw_score = float(scores[pos])
+                prob_score = sigmoid(raw_score)
+                item["score"] = prob_score
+                
+                # Filtrar por relevancia mínima
+                if prob_score >= min_relevance:
+                    ranked_items.append(item)
+        
+        # Recortar a k
+        return ranked_items[:k]
     
     return items[:k]

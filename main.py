@@ -113,6 +113,17 @@ with st.sidebar:
         )
         
         st.caption("Si no seleccionas nada, buscará en toda la base.")
+        
+        st.divider()
+        
+        min_relevance = st.slider(
+            "Exactitud (Relevancia Mínima):",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.0,
+            step=0.05,
+            help="0.0 = Trae todo lo que encuentre (más resultados).\n1.0 = Solo resultados muy exactos (menos resultados)."
+        )
 
 # =====================================
 # MAIN CHAT INTERFACE
@@ -148,14 +159,15 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
             response_text = ""
 
             if intent == "SEARCH":
-                st.caption(f"🔍 **Modo Búsqueda detectado** | Filtros: {filters}")
+                st.caption(f"🔍 **Modo Búsqueda detectado** | Filtros: {filters} | Relevancia > {min_relevance}")
                 
                 # Buscar
                 results = rag_engine.search(
                     st.session_state.collection, 
                     query=search_q, 
                     filters=filters,
-                    k=3
+                    k=3,
+                    min_relevance=min_relevance
                 )
                 
                 if results:
