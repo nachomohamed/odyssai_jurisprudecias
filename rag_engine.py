@@ -74,18 +74,6 @@ class QueryAnalysis(BaseModel):
     filters: SearchFilters = Field(default_factory=SearchFilters, description="Filtros extraídos si la intención es SEARCH.")
     search_query: str = Field(..., description="Texto optimizado para la búsqueda vectorial.")
 
-# =====================================
-# CHROMA SETUP
-# =====================================
-def load_collection():
-    # Configuración para Servidor Remoto (Opción 2)
-    chroma_host = os.environ.get("CHROMA_HOST") # Ej: '34.123.45.67' o 'https://mi-chroma.ngrok.io'
-    chroma_port = os.environ.get("CHROMA_PORT", "8000")
-    
-    if chroma_host:
-        print(f"🔌 Conectando a ChromaDB Remoto en {chroma_host}:{chroma_port}...")
-        # Si es https, el puerto suele ser 443 o ignorado por la lib si la url es completa
-        # Ajuste básico para HttpClient
         try:
             client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port))
         except ValueError:
