@@ -112,13 +112,6 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Actualizar título si es el primer mensaje
-    if len(current_chat["messages"]) == 1:
-        # Usar primeras 5 palabras como título
-        title = " ".join(prompt.split()[:5]) + "..."
-        current_chat["title"] = title
-        st.rerun() # Recargar para actualizar sidebar
-
     # 2. Procesar con el motor RAG
     with st.chat_message("assistant"):
         with st.spinner("Analizando consulta..."):
@@ -172,3 +165,10 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
             
             # Guardar en historial
             current_chat["messages"].append({"role": "assistant", "content": response_text})
+
+    # Actualizar título si es el primer mensaje (y recargar para mostrarlo en sidebar)
+    if len(current_chat["messages"]) == 2: # 1 user + 1 assistant
+        # Usar primeras 5 palabras como título
+        title = " ".join(prompt.split()[:5]) + "..."
+        current_chat["title"] = title
+        st.rerun()
