@@ -74,6 +74,34 @@ class QueryAnalysis(BaseModel):
     filters: SearchFilters = Field(default_factory=SearchFilters, description="Filtros extraídos si la intención es SEARCH.")
     search_query: str = Field(..., description="Texto optimizado para la búsqueda vectorial.")
 
+# =====================================
+# CHROMA SETUP
+# =====================================
+def load_collection():
+    # Configuración para Servidor Remoto (Opción 2)
+    # Intentar leer config local (generada por el servidor)
+    chroma_host = None
+    chroma_port = "8000"
+    
+    config_path = os.path.join(os.path.dirname(__file__), 'server_config.json')
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                chroma_host = config.get("CHROMA_HOST")
+                chroma_port = config.get("CHROMA_PORT", "80")
+                print(f"📂 Configuración cargada desde archivo: {chroma_host}:{chroma_port}")
+        except Exception as e:
+            print(f"⚠️ Error leyendo server_config.json: {e}")
+
+    if not chroma_host:
+        chroma_host = os.environ.get("CHROMA_HOST") # Ej: '34.123.45.67' o 'https://mi-chroma.ngrok.io'
+        chroma_port = os.environ.get("CHROMA_PORT", "8000")
+    
+    if chroma_host:
+        print(f"🔌 Conectando a ChromaDB Remoto en {chroma_host}:{chroma_port}...")
+        # Si es https, el puerto suele ser 443 o ignorado por la lib si la url es completa
+        # Ajuste básico para HttpClient
         try:
             client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port))
         except ValueError:
