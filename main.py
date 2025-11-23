@@ -132,28 +132,22 @@ with st.sidebar:
 # =====================================
 # MAIN CHAT INTERFACE
 # =====================================
+# =====================================
+# MAIN CHAT INTERFACE
+# =====================================
 current_chat = st.session_state.chats[st.session_state.current_chat_id]
 
-# Mostrar historial del chat actual
-for msg in current_chat["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# Input del usuario
-if prompt := st.chat_input("Escribí tu consulta o pedido..."):
-    # 1. Guardar y mostrar mensaje usuario
-    current_chat["messages"].append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # 2. Procesar con el motor RAG
+def process_query(prompt_text):
+    """
+    Procesa la consulta y genera respuesta del asistente.
+    """
     with st.chat_message("assistant"):
         with st.spinner("Analizando consulta..."):
             # Analizar intención
-            analysis = rag_engine.analyze_query(prompt)
+            analysis = rag_engine.analyze_query(prompt_text)
             intent = analysis.get("intent", "CHAT")
             filters = analysis.get("filters", {})
-            search_q = analysis.get("search_query", prompt)
+            search_q = analysis.get("search_query", prompt_text)
             
             # APLICAR FILTROS MANUALES (OVERRIDE)
             if selected_tribunals:
@@ -176,7 +170,7 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
                 
                 if results:
                     # Generar explicación
-                    explanation = rag_engine.generate_rag_response(prompt, results)
+                    explanation = rag_engine.generate_rag_response(prompt_text, results)
                     response_text = explanation
                     
                     # Mostrar tarjetas de resultados (opcional, visualmente lindo)
@@ -206,9 +200,79 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
             # Guardar en historial
             current_chat["messages"].append({"role": "assistant", "content": response_text})
 
+# Mostrar historial del chat actual
+for msg in current_chat["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# Input del usuario
+if prompt := st.chat_input("Escribí tu consulta o pedido..."):
+    # 1. Guardar y mostrar mensaje usuario
+    current_chat["messages"].append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # 2. Procesar
+    process_query(prompt)
+
     # Actualizar título si es el primer mensaje (y recargar para mostrarlo en sidebar)
     if len(current_chat["messages"]) == 2: # 1 user + 1 assistant
         # Usar primeras 5 palabras como título
         title = " ".join(prompt.split()[:5]) + "..."
         current_chat["title"] = title
         st.rerun()
+
+# Botón de Reintentar (Solo si hay mensajes y el último fue del asistente)
+if len(current_chat["messages"]) >= 2 and current_chat["messages"][-1]["role"] == "assistant":
+    st.divider()
+    col1, col2 = st.columns([0.8, 0.2])
+    with col2:
+        if st.button("🔄 Reintentar", help="Vuelve a ejecutar la última pregunta con los filtros actuales."):
+            # Obtener último mensaje del usuario
+            last_user_msg = current_chat["messages"][-2]["content"]
+            
+            # Eliminar última respuesta del asistente
+            current_chat["messages"].pop()
+            
+            # Recargar para borrar la respuesta vieja visualmente y procesar de nuevo
+            # Nota: Streamlit rerun reinicia el script, así que necesitamos una forma de saber que hay que procesar.
+            # Una forma simple es eliminar el mensaje y setear un flag, o simplemente llamar a process_query AQUI si no usamos st.chat_message containers que ya se cerraron.
+            # Pero como process_query usa st.chat_message, lo ideal es limpiar y correr.
+            
+            # Hack simple: Eliminar respuesta, y forzar ejecución inmediata
+            # Al hacer rerun, el historial tendrá 1 mensaje menos. 
+            # Pero necesitamos que se ejecute process_query.
+            # Mejor opción: Simular que el usuario acaba de enviar el mensaje.
+            
+            # Borramos el ultimo user msg tambien para re-inyectarlo?
+            # O simplemente llamamos a process_query?
+            # Si llamamos a process_query aqui, se dibujará ABAJO de todo (incluso del boton).
+            # Lo mejor es usar st.rerun() y un flag en session_state, o simplemente:
+            
+            # Estrategia: Borrar respuesta asistente. Borrar pregunta usuario. Poner pregunta en st.session_state.retry_prompt?
+            # No, mas facil:
+            
+            # 1. Borrar última respuesta
+            # current_chat["messages"].pop()
+            
+            # 2. Llamar process_query con la ultima pregunta (que sigue en el historial)
+            # El problema es que process_query escribe en la UI.
+            # Si lo hacemos aqui, quedará abajo del botón.
+            # Solución: Rerun y detectar que hay que reintentar? Complejo.
+            
+            # Solución Práctica:
+            # Eliminar la respuesta del historial.
+            # Eliminar la pregunta del historial.
+            # Forzar que el input sea la pregunta. (No se puede setear chat_input).
+            
+            # Vamos por la simple:
+            # Eliminar respuesta.
+            # Llamar process_query.
+            # Rerun.
+            
+            # Al llamar process_query, se agregará al historial.
+            # Pero visualmente se verá duplicado hasta el rerun?
+            # Probemos:
+            
+            process_query(last_user_msg)
+            st.rerun()
