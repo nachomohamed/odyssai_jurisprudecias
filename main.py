@@ -48,6 +48,10 @@ if "collection" not in st.session_state:
 # =====================================
 # SIDEBAR: CHAT MANAGEMENT
 # =====================================
+# Inicializar variables de filtros para evitar NameError
+selected_tribunals = []
+min_relevance = 0.0
+
 with st.sidebar:
     st.title("🗂️ Historial")
     
