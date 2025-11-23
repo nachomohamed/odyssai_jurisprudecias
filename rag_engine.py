@@ -78,13 +78,33 @@ class QueryAnalysis(BaseModel):
 # CHROMA SETUP
 # =====================================
 def load_collection():
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    # Configuración para Servidor Remoto (Opción 2)
+    chroma_host = os.environ.get("CHROMA_HOST") # Ej: '34.123.45.67' o 'https://mi-chroma.ngrok.io'
+    chroma_port = os.environ.get("CHROMA_PORT", "8000")
+    
+    if chroma_host:
+        print(f"🔌 Conectando a ChromaDB Remoto en {chroma_host}:{chroma_port}...")
+        # Si es https, el puerto suele ser 443 o ignorado por la lib si la url es completa
+        # Ajuste básico para HttpClient
+        try:
+            client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port))
+        except ValueError:
+            # Si el puerto no es un entero (ej: si viene en la url), intentamos pasar solo host settings
+            # Ojo: HttpClient básico pide host y port separados.
+            client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port))
+            
+    else:
+        # Fallback local (solo si existe la carpeta, para desarrollo local)
+        print(f"📂 Conectando a ChromaDB Local en {CHROMA_DIR}...")
+        client = chromadb.PersistentClient(path=CHROMA_DIR)
+
     try:
         col = client.get_collection(name=DEFAULT_COLLECTION)
     except Exception:
         cols = client.list_collections()
         if not cols:
-            raise RuntimeError(f"❌ No hay colecciones en {CHROMA_DIR}")
+            # Si es remoto y no hay colecciones, es un problema de conexión o de la base remota
+            raise RuntimeError(f"❌ No se encontraron colecciones en ChromaDB ({chroma_host or CHROMA_DIR})")
         col = client.get_collection(name=cols[0].name)
     return col
 
