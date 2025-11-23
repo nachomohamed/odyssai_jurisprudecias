@@ -14,7 +14,7 @@ METADATA_JSON_PATH = 'metadata_values.json'
 def download_db_if_missing():
     """Descarga la base de datos desde Google Drive si no existe localmente."""
     if not os.path.exists(DB_PATH):
-        with st.spinner("Descargando base de datos de jurisprudencia (3.3GB)... esto puede tardar unos minutos."):
+        with st.spinner("Descargando base de datos de jurisprudencia (7 GB)... esto puede tardar unos minutos."):
             try:
                 # Asegurar que el directorio exista
                 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -66,5 +66,16 @@ def extract_metadata_to_json():
 @st.cache_resource
 def initialize_app():
     """Ejecuta tareas de inicialización una sola vez."""
-    download_db_if_missing()
+    # Opción 2: Servidor Remoto
+    # No descargamos nada ni extraemos metadatos locales.
+    # Asumimos que 'metadata_values.json' ya fue generado y subido al repo,
+    # o que la app funcionará con los defaults si no está.
+    
+    # download_db_if_missing()
+    # extract_metadata_to_json()
+    
+    # Si quisieras descargar solo el JSON de metadatos desde Drive (si lo subiste separado), podrías hacerlo aquí.
+    pass
+
+if __name__ == "__main__":
     extract_metadata_to_json()
