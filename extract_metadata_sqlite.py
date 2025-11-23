@@ -6,7 +6,7 @@ def get_unique_values():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    fields = ['tribunal_principal', 'tribunal_sala']
+    fields = ['tribunal_principal', 'tribunal_sala', 'tipo_causa', 'keywords', 'tags_json']
     
     for field in fields:
         print(f"\n--- {field} ---")

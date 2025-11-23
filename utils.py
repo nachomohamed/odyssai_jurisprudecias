@@ -7,7 +7,7 @@ import gdown
 # =====================================
 # CONFIG
 # =====================================
-FILE_ID = '10J4VsnOel0Njd_mkUsJZ9kMqo8JQ3O1r'
+FILE_ID = '1V4BVNytXGNBmjprpmC0xPmFeQnH3v0hl'
 DB_PATH = 'chroma_juris/chroma.sqlite3'
 METADATA_JSON_PATH = 'metadata_values.json'
 

@@ -262,7 +262,8 @@ def search(col, query, filters=None, k=3):
     # 2. Traer más resultados para filtrar después
     # Si hay filtro de año, traemos más para compensar los que descartaremos
     has_year_filter = filters and (filters.get("anio_min") or filters.get("anio_max"))
-    fetch_k = k * 10 if has_year_filter else (k * 5 if USE_RERANK else k)
+    # Aumentamos fetch_k significativamente para tener margen para deduplicar y filtrar
+    fetch_k = k * 15 if has_year_filter else (k * 10 if USE_RERANK else k * 3)
     print(f"--- [DEBUG] Fetch K: {fetch_k} (Rerank: {USE_RERANK}, YearFilter: {has_year_filter}) ---")
     
     print("--- [DEBUG] Ejecutando col.query en Chroma... ---")
@@ -306,13 +307,23 @@ def search(col, query, filters=None, k=3):
                 
                 filtered_items.append(item)
             else:
-                # Si no encontramos fecha, decidimos si incluirlo o no. 
-                # Por defecto, si el usuario pide fecha específica, mejor excluir los que no tienen fecha.
                 pass
         
         print(f"--- [DEBUG] Items después de filtro de año: {len(filtered_items)} ---")
         items = filtered_items
     
+    # 3.5 Deduplicación por Carátula (Para no mostrar 3 veces el mismo fallo)
+    unique_items = []
+    seen_caratulas = set()
+    for item in items:
+        caratula = item["metadata"].get("caratula", "SIN_CARATULA")
+        if caratula not in seen_caratulas:
+            unique_items.append(item)
+            seen_caratulas.add(caratula)
+    
+    items = unique_items
+    print(f"--- [DEBUG] Items después de deduplicación: {len(items)} ---")
+
     if not items:
         print("--- [DEBUG] No quedaron items después del filtrado. ---")
         return []
@@ -320,13 +331,16 @@ def search(col, query, filters=None, k=3):
     # 4. Reranking
     if USE_RERANK:
         print("--- [DEBUG] Iniciando Reranking... ---")
-        idxs, scores = rerank(query, [x["texto"] for x in items])
+        # Rerankear solo los top 20 para no tardar tanto si hay muchos
+        items_to_rerank = items[:20] 
+        idxs, scores = rerank(query, [x["texto"] for x in items_to_rerank])
         print("--- [DEBUG] Reranking finalizado. ---")
         ranked_items = []
         for pos, idx in enumerate(idxs[:k]):
-            item = items[idx].copy()
-            item["score"] = float(scores[pos])
-            ranked_items.append(item)
+            if idx < len(items_to_rerank):
+                item = items_to_rerank[idx].copy()
+                item["score"] = float(scores[pos])
+                ranked_items.append(item)
         return ranked_items
     
     return items[:k]

@@ -23,7 +23,7 @@ ADD_BATCH = 1024
 EXPECTED_COLS = [
     "tribunal_principal","tribunal_sala","caratula","tipo_causa",
     "nro_expediente","nro_sentencia","fecha_sentencia","registro",
-    "sumario","texto"
+    "sumario","texto","keywords","tags_json"
 ]
 
 # --------------- Utilidades --------------------
@@ -104,14 +104,18 @@ def build_metadata(row: pd.Series, chunk_id: int) -> Dict:
         "registro": safe_str(row.get("registro", "")),
         "anio": safe_int_year(row.get("fecha_sentencia", "")) if safe_int_year(row.get("fecha_sentencia", "")) is not None else -1,
         "sumario": safe_str(row.get("sumario", "")),
+        "keywords": safe_str(row.get("keywords", "")),
+        "tags_json": safe_str(row.get("tags_json", "")),
         "chunk_id": int(chunk_id),
     }
     return sanitize_metadata(meta)
 
 def ensure_expected_columns(df_cols: List[str]):
-    missing = [c for c in EXPECTED_COLS if c not in df_cols]
+    # Solo chequeamos las esenciales, keywords/tags pueden ser opcionales si el CSV es viejo
+    essentials = ["tribunal_principal", "texto"] 
+    missing = [c for c in essentials if c not in df_cols]
     if missing:
-        raise ValueError(f"Faltan columnas en el CSV: {missing}")
+        raise ValueError(f"Faltan columnas esenciales en el CSV: {missing}")
 
 # --------------- Proceso principal ----------------
 
@@ -138,14 +142,17 @@ def main():
     buffer_ids, buffer_docs, buffer_meta = [], [], []
 
     for df in pd.read_csv(CSV_PATH, chunksize=READ_CHUNK_ROWS):
-        ensure_expected_columns(df.columns.tolist())
+        # ensure_expected_columns(df.columns.tolist()) # Relaxed check inside function
 
         for _, row in df.iterrows():
             total_rows += 1
 
+            # Incluimos keywords y tags en el texto para que la búsqueda semántica los encuentre
             base_text = " ".join([
                 safe_str(row.get("sumario", "")),
                 safe_str(row.get("texto", "")),
+                "KEYWORDS: " + safe_str(row.get("keywords", "")),
+                "TAGS: " + safe_str(row.get("tags_json", ""))
             ]).strip()
 
             if not base_text:
