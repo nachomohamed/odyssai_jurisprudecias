@@ -85,3 +85,5 @@ secrets.toml
 start_servers.bat
 ngrok.exe
 ngrok.zip
+
+chroma.log
