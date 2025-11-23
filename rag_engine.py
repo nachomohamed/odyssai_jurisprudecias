@@ -100,14 +100,16 @@ def load_collection():
     
     if chroma_host:
         print(f"🔌 Conectando a ChromaDB Remoto en {chroma_host}:{chroma_port}...")
-        # Si es https, el puerto suele ser 443 o ignorado por la lib si la url es completa
-        # Ajuste básico para HttpClient
+        
+        # Determinar si usar SSL
+        use_ssl = False
+        if str(chroma_port) == "443":
+            use_ssl = True
+            
         try:
-            client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port))
+            client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port), ssl=use_ssl)
         except ValueError:
-            # Si el puerto no es un entero (ej: si viene en la url), intentamos pasar solo host settings
-            # Ojo: HttpClient básico pide host y port separados.
-            client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port))
+            client = chromadb.HttpClient(host=chroma_host, port=int(chroma_port), ssl=use_ssl)
             
     else:
         # Fallback local (solo si existe la carpeta, para desarrollo local)
