@@ -22,10 +22,20 @@ import rag_engine
 st.title("⚖️ Asistente Jurídico & Buscador de Jurisprudencia")
 
 # =====================================
-# SESSION STATE
+# SESSION STATE MANAGEMENT
 # =====================================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+import uuid
+
+if "chats" not in st.session_state:
+    # Estructura: { "chat_id": { "title": "...", "messages": [] } }
+    default_id = str(uuid.uuid4())
+    st.session_state.chats = {
+        default_id: {"title": "Nueva Conversación", "messages": []}
+    }
+    st.session_state.current_chat_id = default_id
+
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
 
 if "collection" not in st.session_state:
     with st.spinner("Cargando base de datos de jurisprudencia..."):
@@ -36,19 +46,78 @@ if "collection" not in st.session_state:
             st.error(f"Error cargando la base de datos: {e}")
 
 # =====================================
-# CHAT INTERFACE
+# SIDEBAR: CHAT MANAGEMENT
 # =====================================
-# Mostrar historial
-for msg in st.session_state.messages:
+with st.sidebar:
+    st.title("🗂️ Historial")
+    
+    # Botón Nueva Conversación
+    if st.button("➕ Nueva Conversación", use_container_width=True):
+        new_id = str(uuid.uuid4())
+        st.session_state.chats[new_id] = {"title": "Nueva Conversación", "messages": []}
+        st.session_state.current_chat_id = new_id
+        st.rerun()
+
+    st.divider()
+
+    # Lista de Conversaciones
+    # Ordenar por creación (aunque dict no garantiza orden en versiones viejas, en 3.7+ sí)
+    # Lo ideal sería guardar timestamp, pero simplificamos iterando keys.
+    chat_ids = list(st.session_state.chats.keys())
+    
+    # Usamos radio button para seleccionar (es lo más limpio en Streamlit nativo)
+    # Mapeamos ID -> Título para mostrar
+    options = chat_ids
+    format_func = lambda x: st.session_state.chats[x]["title"]
+    
+    selected_id = st.radio(
+        "Tus Chats:",
+        options=options,
+        format_func=format_func,
+        index=options.index(st.session_state.current_chat_id) if st.session_state.current_chat_id in options else 0,
+        label_visibility="collapsed"
+    )
+    
+    # Actualizar selección si cambió
+    if selected_id != st.session_state.current_chat_id:
+        st.session_state.current_chat_id = selected_id
+        st.rerun()
+
+    st.divider()
+    
+    # Botón Eliminar
+    if st.button("🗑️ Eliminar Conversación Actual", type="primary", use_container_width=True):
+        if len(st.session_state.chats) > 1:
+            del st.session_state.chats[st.session_state.current_chat_id]
+            # Seleccionar otro
+            st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
+            st.rerun()
+        else:
+            st.warning("No puedes eliminar la única conversación activa.")
+
+# =====================================
+# MAIN CHAT INTERFACE
+# =====================================
+current_chat = st.session_state.chats[st.session_state.current_chat_id]
+
+# Mostrar historial del chat actual
+for msg in current_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # Input del usuario
 if prompt := st.chat_input("Escribí tu consulta o pedido..."):
     # 1. Guardar y mostrar mensaje usuario
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    current_chat["messages"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
+
+    # Actualizar título si es el primer mensaje
+    if len(current_chat["messages"]) == 1:
+        # Usar primeras 5 palabras como título
+        title = " ".join(prompt.split()[:5]) + "..."
+        current_chat["title"] = title
+        st.rerun() # Recargar para actualizar sidebar
 
     # 2. Procesar con el motor RAG
     with st.chat_message("assistant"):
@@ -94,7 +163,7 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
                 # Preparamos historial para OpenAI (solo texto)
                 chat_history = [
                     {"role": m["role"], "content": m["content"]} 
-                    for m in st.session_state.messages
+                    for m in current_chat["messages"]
                 ]
                 response_text = rag_engine.generate_chat_response(chat_history)
 
@@ -102,4 +171,4 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
             st.markdown(response_text)
             
             # Guardar en historial
-            st.session_state.messages.append({"role": "assistant", "content": response_text})
+            current_chat["messages"].append({"role": "assistant", "content": response_text})
