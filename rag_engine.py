@@ -258,8 +258,18 @@ def generate_chat_response(history: List[Dict]) -> str:
 # =====================================
 def build_query_filters(filters):
     conditions = []
+    
+    # Filtro de Tribunal (Soporta str o list)
     if filters.get("tribunal"):
-        conditions.append({"tribunal_principal": filters["tribunal"]})
+        val = filters["tribunal"]
+        if isinstance(val, list) and len(val) > 0:
+            if len(val) == 1:
+                conditions.append({"tribunal_principal": val[0]})
+            else:
+                conditions.append({"tribunal_principal": {"$in": val}})
+        elif isinstance(val, str):
+            conditions.append({"tribunal_principal": val})
+
     if filters.get("sala"):
         conditions.append({"tribunal_sala": filters["sala"]})
     # REMOVED: tipo_causa is too strict for metadata filtering. 

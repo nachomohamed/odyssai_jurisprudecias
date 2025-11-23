@@ -95,6 +95,25 @@ with st.sidebar:
         else:
             st.warning("No puedes eliminar la única conversación activa.")
 
+    st.divider()
+    
+    # =====================================
+    # FILTROS AVANZADOS (OJO CLÍNICO)
+    # =====================================
+    with st.expander("⚙️ Configuración de Búsqueda"):
+        st.caption("Filtra por fuero para evitar resultados irrelevantes (ej: Familia en casos Laborales).")
+        
+        # Obtener lista de tribunales desde el engine
+        available_tribunales = sorted(rag_engine.TRIBUNALES)
+        
+        selected_tribunales = st.multiselect(
+            "Limitar a Tribunales:",
+            options=available_tribunales,
+            placeholder="Todos los tribunales"
+        )
+        
+        st.caption("Si no seleccionas nada, buscará en toda la base.")
+
 # =====================================
 # MAIN CHAT INTERFACE
 # =====================================
@@ -121,6 +140,11 @@ if prompt := st.chat_input("Escribí tu consulta o pedido..."):
             filters = analysis.get("filters", {})
             search_q = analysis.get("search_query", prompt)
             
+            # APLICAR FILTROS MANUALES (OVERRIDE)
+            if selected_tribunals:
+                filters["tribunal"] = selected_tribunals
+                st.toast(f"Filtro activo: {len(selected_tribunals)} tribunales seleccionados.")
+
             response_text = ""
 
             if intent == "SEARCH":
