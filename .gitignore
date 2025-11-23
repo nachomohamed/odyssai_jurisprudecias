@@ -80,3 +80,8 @@ openai_api_key.txt
 /converted_docx
 secrets.toml
 *.csv
+
+# Local Server Scripts & Tools
+start_servers.bat
+ngrok.exe
+ngrok.zip
