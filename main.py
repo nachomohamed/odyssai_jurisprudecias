@@ -1,438 +1,278 @@
-# app.py
-import json
-import uuid
-import pandas as pd
 import streamlit as st
-from typing import List, Dict, Tuple
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+import os
+import utils
 
-# =============================
-# Configuración base
-# =============================
-st.set_page_config(page_title="⚖️ Jurisprudencia Assistant", layout="wide")
-st.title("⚖️ Jurisprudencia Assistant")
+# =====================================
+# PAGE CONFIG
+# =====================================
+st.set_page_config(
+    page_title="Asistente Jurídico IA",
+    page_icon="⚖️",
+    layout="centered"
+)
 
-OPENAI_KEY = st.secrets["OPENAI_KEY"]
+# =====================================
+# INITIALIZATION
+# =====================================
+# Ejecutar descarga y extracción de metadatos antes de cargar el motor RAG
+utils.initialize_app()
 
-# =============================
-# Estado global
-# =============================
-if "messages" not in st.session_state:
-    st.session_state.messages: List[Dict[str, str]] = []  # [{role, content}]
-if "picked_docs" not in st.session_state:
-    # docs elegidos por el LLM: [{"metadata": {...}, "page_content": "..."}]
-    st.session_state.picked_docs: List[Dict] = []
-if "last_mode" not in st.session_state:
-    st.session_state.last_mode: str = "research"
+import rag_engine
 
-# =============================
-# Modelos
-# =============================
-# Router barato para intención
-router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_KEY)
-# Modelo principal
-main_llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=OPENAI_KEY)
+st.title("⚖️ Asistente Jurídico & Buscador de Jurisprudencia")
 
-# =============================
-# Retriever (MMR)
-# =============================
-@st.cache_resource
-def load_retriever():
-    embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",   # Debe coincidir con el usado al indexar FAISS
-        openai_api_key=OPENAI_KEY
+# =====================================
+# SESSION STATE MANAGEMENT
+# =====================================
+import uuid
+
+if "chats" not in st.session_state:
+    # Estructura: { "chat_id": { "title": "...", "messages": [] } }
+    default_id = str(uuid.uuid4())
+    st.session_state.chats = {
+        default_id: {"title": "Nueva Conversación", "messages": []}
+    }
+    st.session_state.current_chat_id = default_id
+
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
+
+if "collection" not in st.session_state:
+    with st.spinner("Cargando base de datos de jurisprudencia..."):
+        try:
+            st.session_state.collection = rag_engine.load_collection()
+            st.success("Base de datos cargada correctamente.")
+        except Exception as e:
+            st.error(f"Error cargando la base de datos: {e}")
+
+# =====================================
+# SIDEBAR: CHAT MANAGEMENT
+# =====================================
+# Inicializar variables de filtros para evitar NameError
+selected_tribunals = []
+min_relevance = 0.0
+
+with st.sidebar:
+    st.title("🗂️ Historial")
+    
+    # Botón Nueva Conversación
+    if st.button("➕ Nueva Conversación", use_container_width=True):
+        new_id = str(uuid.uuid4())
+        st.session_state.chats[new_id] = {"title": "Nueva Conversación", "messages": []}
+        st.session_state.current_chat_id = new_id
+        st.rerun()
+
+    st.divider()
+
+    # Lista de Conversaciones
+    # Ordenar por creación (aunque dict no garantiza orden en versiones viejas, en 3.7+ sí)
+    # Lo ideal sería guardar timestamp, pero simplificamos iterando keys.
+    chat_ids = list(st.session_state.chats.keys())
+    
+    # Usamos radio button para seleccionar (es lo más limpio en Streamlit nativo)
+    # Mapeamos ID -> Título para mostrar
+    options = chat_ids
+    format_func = lambda x: st.session_state.chats[x]["title"]
+    
+    selected_id = st.radio(
+        "Tus Chats:",
+        options=options,
+        format_func=format_func,
+        index=options.index(st.session_state.current_chat_id) if st.session_state.current_chat_id in options else 0,
+        label_visibility="collapsed"
     )
-    vs = FAISS.load_local(
-        "vectorstore_jurisprudencia",
-        embeddings,
-        allow_dangerous_deserialization=True
-    )
-    return vs.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 10, "fetch_k": 50, "lambda_mult": 0.5}
-    )
+    
+    # Actualizar selección si cambió
+    if selected_id != st.session_state.current_chat_id:
+        st.session_state.current_chat_id = selected_id
+        st.rerun()
 
-retriever = load_retriever()
+    st.divider()
+    
+    # Botón Eliminar
+    if st.button("🗑️ Eliminar Conversación Actual", type="primary", use_container_width=True):
+        if len(st.session_state.chats) > 1:
+            del st.session_state.chats[st.session_state.current_chat_id]
+            # Seleccionar otro
+            st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
+            st.rerun()
+        else:
+            st.warning("No puedes eliminar la única conversación activa.")
 
-# =============================
-# Helpers UI
-# =============================
-DISPLAY_ORDER = [
-    "caratula",
-    "tribunal_principal", "tribunal_sala",
-    "tipo_causa",
-    "nro_expediente", "nro_sentencia", "registro",
-    "fecha_sentencia",
-    "sumario",
-    "texto",
-]
-
-def render_kv_table(meta: dict):
-    """Tabla Columna | Contenido + expanders para sumario/texto."""
-    meta = meta or {}
-    rows, seen = [], set()
-
-    for k in DISPLAY_ORDER:
-        if k in meta and meta[k] not in (None, "", "nan"):
-            if k in ["sumario", "texto"]:
-                continue
-            rows.append({"Columna": k, "Contenido": str(meta[k])})
-            seen.add(k)
-
-    for k, v in meta.items():
-        if k in seen or k in ["sumario", "texto"]:
-            continue
-        if v not in (None, "", "nan"):
-            rows.append({"Columna": k, "Contenido": str(v)})
-
-    if rows:
-        st.table(pd.DataFrame(rows))
-
-    if meta.get("sumario"):
-        with st.expander("sumario", expanded=True):
-            st.write(str(meta["sumario"]))
-    if meta.get("texto"):
-        with st.expander("texto", expanded=False):
-            st.write(str(meta["texto"]))
-
-def show_active_docs():
-    """Panel con las jurisprudencias activas para conversar sobre ellas."""
-    docs = st.session_state.picked_docs
-    if not docs:
-        return
-    with st.expander(f"📚 Jurisprudencias activas ({len(docs)})", expanded=False):
-        for i, d in enumerate(docs, start=1):
-            meta = d["metadata"] or {}
-            titulo = meta.get("caratula") or meta.get("titulo") or f"Jurisprudencia {i}"
-            trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
-            fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
-            header = f"**{titulo}**" + (f" — {trib}" if trib else "") + (f" — {fecha}" if fecha else "")
-            st.markdown(f"{i}. {header}")
-            with st.expander(f"Ver detalles: {titulo}", expanded=False):
-                render_kv_table(meta)
-
-# =============================
-# Router de intención (LLM)
-# =============================
-def classify_intent(user_message: str) -> str:
-    hist_pairs = [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-12:]]
-    history_text = "\n".join(hist_pairs)
-
-    system = (
-        "You are an intention classifier for a legal assistant. "
-        "Decide if the user wants to SEARCH/RETRIEVE new jurisprudences (label: research), "
-        "or CHAT/DISCUSS about already retrieved jurisprudences (label: chat). "
-        "Return EXACTLY one token: research OR chat."
-    )
-    user = (
-        f"Conversation so far:\n{history_text}\n\n"
-        f"New user message:\n{user_message}\n\n"
-        "Return: research OR chat"
-    )
-    out = router_llm.invoke([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user}
-    ])
-    label = (out.content if hasattr(out, "content") else str(out)).strip().lower()
-    if label not in ("research", "chat"):
-        label = "research"
-    if label == "chat" and not st.session_state.picked_docs:
-        label = "research"
-    return label
-
-# =============================
-# Research helpers
-# =============================
-def choose_uid(doc_meta: dict, extract: str) -> str:
-    titulo = (doc_meta.get("caratula") or doc_meta.get("titulo") or "Jurisprudencia").strip()
-    trib = (doc_meta.get("tribunal_principal") or doc_meta.get("tribunal") or "").strip()
-    fecha = (doc_meta.get("fecha_sentencia") or doc_meta.get("fecha") or "").strip()
-    tipo = (doc_meta.get("tipo_causa") or "").strip()
-    descriptor = " ".join([x for x in [titulo, trib, fecha, tipo] if x])
-    key = (descriptor + " | " + extract[:200]).strip()
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
-
-def _distinct_strings(lst: List[str]) -> bool:
-    norm = [(" ".join((s or "").lower().split())) for s in lst]
-    return len(set(norm)) == len(norm)
-
-def llm_pick_top3_and_explain(user_query: str, candidates: List[Dict], retry_hint: str = "") -> Tuple[str, List[Dict]]:
-    """
-    candidates: [{uid, descriptor, extracto}]
-    Devuelve (intro:str, items:list[{uid, bullets, resumen}])
-    """
-    system = (
-        "Eres un asistente jurídico. Recibirás hasta 10 fallos candidatos. "
-        "Debes elegir EXACTAMENTE 3. Sé específico y no repitas explicaciones entre casos. "
-        "Para cada fallo: viñetas claras sobre hechos clave, normas/artículos (p. ej. art. 242 LCT si figura), "
-        "jurisdicción/instancia/fecha y resultado/criterio. Incluye al menos una cita corta (≤12 palabras) del extracto. "
-        "No inventes."
-    )
-    user = (
-        f"Consulta del abogado:\n{user_query}\n\n"
-        "Fallos candidatos (uid, descriptor, extracto parcial):\n"
-        f"{json.dumps(candidates, ensure_ascii=False)}\n\n"
-        "TAREA:\n"
-        "1) Selecciona los 3 fallos más relevantes (no más ni menos).\n"
-        "2) Devuelve SOLO JSON exacto:\n"
-        "{\n"
-        '  "intro": "texto",\n'
-        '  "items": [\n'
-        '    {"uid": "uid1", "bullets": ["• punto 1", "• punto 2", "• punto 3"], "resumen": "frase final"},\n'
-        '    {"uid": "uid2", "bullets": ["• ..."], "resumen": "..."},\n'
-        '    {"uid": "uid3", "bullets": ["• ..."], "resumen": "..."}\n'
-        "  ]\n"
-        "}\n"
-        "Evita bullets genéricos tipo 'coincidencias fácticas y normativas'. "
-        "Cita nombres de partes, artículos o fragmentos reales del extracto cuando ayuden.\n"
-        f"{retry_hint}"
-    )
-    out = main_llm.invoke([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user}
-    ])
-    text = out.content if hasattr(out, "content") else str(out)
-
-    try:
-        data = json.loads(text)
-        intro = (data.get("intro") or "").strip()
-        items = data.get("items") or []
-        result = []
-        for it in items[:3]:
-            uid = (it.get("uid") or "").strip()
-            bullets = it.get("bullets") or []
-            resumen = (it.get("resumen") or "").strip()
-            if uid and bullets and resumen:
-                result.append({"uid": uid, "bullets": bullets, "resumen": resumen})
-        if len(result) < 3:
-            raise ValueError("Menos de 3 ítems válidos")
-        return intro, result
-    except Exception:
-        return "", []
-
-# ====== Segundo pase de justificación breve y neutral por fallo ======
-def llm_extra_why(user_query: str, descriptor: str, extracto: str, ya_dicho: str = "") -> str:
-    system = (
-        "Eres un asistente jurídico. Redacta una justificación breve (2–3 frases), neutral y profesional, "
-        "respondiendo por qué este fallo es adecuado para el caso planteado. "
-        "Evita repetir literalmente argumentos ya dichos. No inventes."
-    )
-    user = (
-        f"Caso del abogado:\n{user_query}\n\n"
-        f"Fallo:\n{descriptor}\n\n"
-        f"Extracto (contexto real):\n{extracto[:1200]}\n\n"
-        f"Lo ya dicho (para no repetir):\n{ya_dicho}\n\n"
-        "Devuelve solo el párrafo (2–3 frases)."
-    )
-    out = main_llm.invoke([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user}
-    ])
-    return (out.content if hasattr(out, "content") else str(out)).strip()
-
-# =============================
-# Research con diagnósticos y fallbacks
-# =============================
-def run_research(user_query: str):
-    """Pipeline de búsqueda y render con segundo pase + diagnósticos + fallbacks."""
-    # 0) Recuperar candidatos con manejo de errores
-    try:
-        candidate_docs = retriever.get_relevant_documents(user_query)
-    except Exception as e:
-        st.error(f"❌ Error al recuperar documentos del vectorstore: {e}")
-        return
-
-    # 1) Si no hay candidatos, avisar
-    if not candidate_docs:
-        st.warning("⚠️ No encontré jurisprudencias relevantes. Verificá que el índice FAISS tenga contenido y que la consulta sea específica (hechos, norma, jurisdicción, período).")
-        return
-
-    # 2) Diagnóstico visible (primeros 10 títulos)
-    diag_titles = []
-    for d in candidate_docs[:10]:
-        m = d.metadata or {}
-        titulo = m.get("caratula") or m.get("titulo") or "Jurisprudencia"
-        trib = m.get("tribunal_principal") or m.get("tribunal") or ""
-        fecha = m.get("fecha_sentencia") or m.get("fecha") or ""
-        diag_titles.append(" — ".join([x for x in [titulo, trib, fecha] if x]))
-    st.info(f"🔎 Candidatos recuperados: {len(candidate_docs)}\n\n" + "\n".join([f"- {t}" for t in diag_titles]))
-
-    # 3) Armar candidatos para el LLM
-    candidates = []
-    uid_to_docdict = {}
-    for d in candidate_docs[:10]:
-        meta = d.metadata or {}
-        titulo = meta.get("caratula") or meta.get("titulo") or "Jurisprudencia"
-        trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
-        fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
-        tipo = meta.get("tipo_causa") or ""
-        descriptor = " — ".join([x for x in [titulo, trib, fecha, tipo] if x])
-        extracto = (getattr(d, "page_content", "") or "")[:1600]
-        uid = choose_uid(meta, extracto)
-        candidates.append({"uid": uid, "descriptor": descriptor, "extracto": extracto})
-        uid_to_docdict[uid] = {"metadata": meta, "page_content": getattr(d, "page_content", "") or ""}
-
-    # 4) LLM elige 3
-    intro, picked = llm_pick_top3_and_explain(user_query, candidates)
-
-    # 5) Reintento si vienen vacíos o muy parecidos
-    if not picked or not _distinct_strings([p.get("resumen","") for p in picked]):
-        intro2, picked2 = llm_pick_top3_and_explain(
-            user_query, candidates,
-            retry_hint="ATENCIÓN: explicaciones muy parecidas o vacías. Asegura diferencias concretas entre los casos (hechos, norma/artículo, resultado, jurisdicción/fecha) y usa fragmentos distintos del extracto."
+    st.divider()
+    
+    # =====================================
+    # FILTROS AVANZADOS (OJO CLÍNICO)
+    # =====================================
+    with st.expander("⚙️ Configuración de Búsqueda"):
+        st.caption("Filtra por fuero para evitar resultados irrelevantes (ej: Familia en casos Laborales).")
+        
+        # Obtener lista de tribunales desde el engine
+        available_tribunales = sorted(rag_engine.TRIBUNALES)
+        
+        selected_tribunales = st.multiselect(
+            "Limitar a Tribunales:",
+            options=available_tribunales,
+            placeholder="Todos los tribunales"
         )
-        if picked2:
-            intro = intro2 or intro
-            picked = picked2
+        
+        st.caption("Si no seleccionas nada, buscará en toda la base.")
+        
+        st.divider()
+        
+        min_relevance = st.slider(
+            "Exactitud (Relevancia Mínima):",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.0,
+            step=0.05,
+            help="0.0 = Trae todo lo que encuentre (más resultados).\n1.0 = Solo resultados muy exactos (menos resultados)."
+        )
 
-    # 6) Fallback duro: si igual no hay picked, usar top-3 del retriever con explicación heurística
-    if not picked:
-        picked = []
-        for c in candidates[:3]:
-            picked.append({
-                "uid": c["uid"],
-                "bullets": [
-                    "• Hechos del extracto que guardan similitud con el caso.",
-                    "• Referencias normativas y criterios mencionados en el texto.",
-                    "• Jurisdicción/instancia/fecha compatibles para tu planteo."
-                ],
-                "resumen": "Útil como apoyo por cercanía fáctica y encuadre normativo."
-            })
-        intro = intro or "Analicé tu consulta y seleccioné los fallos más pertinentes disponibles."
+# =====================================
+# MAIN CHAT INTERFACE
+# =====================================
+# =====================================
+# MAIN CHAT INTERFACE
+# =====================================
+current_chat = st.session_state.chats[st.session_state.current_chat_id]
 
-    # 7) Mostrar intro
-    st.markdown(f"**{intro}**")
+def process_query(prompt_text):
+    """
+    Procesa la consulta y genera respuesta del asistente.
+    """
+    with st.chat_message("assistant"):
+        with st.spinner("Analizando consulta..."):
+            # Analizar intención
+            analysis = rag_engine.analyze_query(prompt_text)
+            intent = analysis.get("intent", "CHAT")
+            filters = analysis.get("filters", {})
+            search_q = analysis.get("search_query", prompt_text)
+            
+            # APLICAR FILTROS MANUALES (OVERRIDE)
+            if selected_tribunals:
+                filters["tribunal"] = selected_tribunals
+                st.toast(f"Filtro activo: {len(selected_tribunals)} tribunales seleccionados.")
 
-    # 8) Guardar en estado para chat posterior
-    st.session_state.picked_docs = [uid_to_docdict[x["uid"]] for x in picked if x["uid"] in uid_to_docdict]
+            response_text = ""
 
-    # 9) Render por ítem + segundo pase + resumen
-    resumen_lines = []
-    any_rendered = False
+            if intent == "SEARCH":
+                st.caption(f"🔍 **Modo Búsqueda detectado** | Filtros: {filters} | Relevancia > {min_relevance}")
+                
+                # Buscar
+                results = rag_engine.search(
+                    st.session_state.collection, 
+                    query=search_q, 
+                    filters=filters,
+                    k=3,
+                    min_relevance=min_relevance
+                )
+                
+                if results:
+                    # Generar explicación
+                    explanation = rag_engine.generate_rag_response(prompt_text, results)
+                    response_text = explanation
+                    
+                    # Mostrar tarjetas de resultados (opcional, visualmente lindo)
+                    st.markdown("### 📄 Fallos Encontrados")
+                    for i, res in enumerate(results, 1):
+                        meta = res["metadata"]
+                        with st.expander(f"#{i} {meta.get('caratula', 'Sin Carátula')}"):
+                            st.markdown(f"**Tribunal:** {meta.get('tribunal_principal', '-')}")
+                            st.markdown(f"**Fecha:** {meta.get('fecha_sentencia', '-')}")
+                            st.markdown(f"**Score:** {res.get('score', 0):.2f}")
+                            st.text(res["texto"][:500] + "...")
+                else:
+                    response_text = "No encontré jurisprudencia que coincida con esos criterios específicos. ¿Querés probar con términos más generales?"
+            
+            else:
+                # Modo CHAT
+                # Preparamos historial para OpenAI (solo texto)
+                chat_history = [
+                    {"role": m["role"], "content": m["content"]} 
+                    for m in current_chat["messages"]
+                ]
+                response_text = rag_engine.generate_chat_response(chat_history)
 
-    for i, item in enumerate(picked, start=1):
-        uid = item["uid"]
-        docd = uid_to_docdict.get(uid)
-        if not docd:
-            continue  # saltear si no lo encuentro
-        any_rendered = True
+            # Mostrar respuesta final
+            st.markdown(response_text)
+            
+            # Guardar en historial
+            current_chat["messages"].append({"role": "assistant", "content": response_text})
 
-        meta = docd["metadata"]
-        titulo = meta.get("caratula") or meta.get("titulo") or "Jurisprudencia"
-        trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
-        fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
-        header = f"**{titulo}**" + (f" — {trib}" if trib else "") + (f" — {fecha}" if fecha else "")
+# Mostrar historial del chat actual
+for msg in current_chat["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-        # explicación principal
-        st.markdown(f"**{i}. {titulo}**")
-        for b in item.get("bullets", []):
-            st.markdown(b)
-        if item.get("resumen"):
-            st.markdown(f"_**Conclusión:**_ {item['resumen']}")
+# Input del usuario
+if prompt := st.chat_input("Escribí tu consulta o pedido..."):
+    # 1. Guardar y mostrar mensaje usuario
+    current_chat["messages"].append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-        # segundo pase
-        descriptor = " — ".join([x for x in [titulo, trib, fecha] if x])
-        extracto = (docd["page_content"] or "")[:1600]
-        ya_dicho = " | ".join(item.get("bullets", [])) + " | " + item.get("resumen", "")
-        extra = llm_extra_why(user_query, descriptor, extracto, ya_dicho)
-        if extra:
-            st.markdown(f"_**Justificación adicional:**_ {extra}")
+    # 2. Procesar
+    process_query(prompt)
 
-        # detalles
-        with st.expander(header, expanded=(i == 1)):
-            render_kv_table(meta)
+    # Actualizar título si es el primer mensaje (y recargar para mostrarlo en sidebar)
+    if len(current_chat["messages"]) == 2: # 1 user + 1 assistant
+        # Usar primeras 5 palabras como título
+        title = " ".join(prompt.split()[:5]) + "..."
+        current_chat["title"] = title
+        st.rerun()
 
-        # resumen final
-        linea = f"{i}. {titulo} — {item.get('resumen','')}".strip()
-        if extra:
-            linea += f"\n   ➤ {extra}"
-        resumen_lines.append(linea)
-
-    # 10) Evitar “resumen vacío”
-    if any_rendered and resumen_lines:
-        final_msg = "🧠 **Resumen breve (con justificación adicional):**\n" + "\n\n".join(resumen_lines)
-        st.session_state.messages.append({"role": "assistant", "content": final_msg})
-        st.chat_message("assistant").markdown(final_msg)
-    else:
-        st.warning("⚠️ No se pudo renderizar ningún fallo. Revisá que el índice tenga texto en 'page_content' (p. ej., columnas 'sumario'/'texto') y vuelve a intentar.")
-
-# =============================
-# Chat sobre jurisprudencias activas
-# =============================
-def run_chat(user_message: str):
-    docs = st.session_state.picked_docs
-    if not docs:
-        # si no hay, degradar a research
-        return run_research(user_message)
-
-    # mostrar siempre qué jurisprudencias están activas
-    show_active_docs()
-
-    # contexto
-    ctx_blocks = []
-    for idx, d in enumerate(docs, start=1):
-        meta = d["metadata"] or {}
-        titulo = meta.get("caratula") or meta.get("titulo") or f"Jurisprudencia {idx}"
-        trib = meta.get("tribunal_principal") or meta.get("tribunal") or ""
-        fecha = meta.get("fecha_sentencia") or meta.get("fecha") or ""
-        header = " — ".join([x for x in [titulo, trib, fecha] if x])
-        extracto = (d["page_content"] or "")[:2000]
-        ctx_blocks.append(f"[{idx}] {header}\n{extracto}")
-
-    context = "\n\n---\n\n".join(ctx_blocks)
-
-    system = (
-        "Eres un asistente jurídico en MODO CONVERSACIÓN. "
-        "Responde exclusivamente usando la jurisprudencia recuperada y listada a continuación. "
-        "Si algo no figura en los textos, dilo explícitamente. "
-        "Puedes comparar, resumir, o redactar borradores basándote en los fallos provistos.\n\n"
-        f"Jurisprudencia disponible:\n{context}"
-    )
-    out = main_llm.invoke([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_message}
-    ])
-    answer = out.content if hasattr(out, "content") else str(out)
-    st.session_state.messages.append({"role": "assistant", "content": answer})
-    st.chat_message("assistant").markdown(answer)
-
-# =============================
-# Mostrar historial previo
-# =============================
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).markdown(msg["content"])
-
-# =============================
-# Entrada de usuario
-# =============================
-user_input = st.chat_input("Escribí tu mensaje (p. ej., 'buscá...', 'compará...', 'resumí...', 'redactá...')")
-if user_input:
-    # mostrar el mensaje del usuario inmediatamente
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    st.chat_message("user").markdown(user_input)
-
-    # clasificar intención por LLM
-    intent = classify_intent(user_input)
-    st.session_state.last_mode = intent
-
-    # ejecutar modo correspondiente
-    if intent == "research":
-        run_research(user_input)
-    else:
-        run_chat(user_input)
-
-# =============================
-# Siempre visible: jurisprudencias activas (si hay)
-# =============================
-show_active_docs()
-
-
-# =============================
-# Nota:
-# - Este código asume que tu vectorstore FAISS ya existe en 'vectorstore_jurisprudencia'
-#   con documentos que contienen en page_content el texto del fallo y, si es posible,
-#   metadata como 'caratula', 'tribunal_principal', 'fecha_sentencia', etc.
-# - Si querés ajustar el umbral de similitud o filtros por jurisdicción/año,
-#   podés crear el retriever con: vs.as_retriever(search_kwargs={"k": 3, "score_threshold": 0.2})
-# =============================
+# Botón de Reintentar (Solo si hay mensajes y el último fue del asistente)
+if len(current_chat["messages"]) >= 2 and current_chat["messages"][-1]["role"] == "assistant":
+    st.divider()
+    col1, col2 = st.columns([0.8, 0.2])
+    with col2:
+        if st.button("🔄 Reintentar", help="Vuelve a ejecutar la última pregunta con los filtros actuales."):
+            # Obtener último mensaje del usuario
+            last_user_msg = current_chat["messages"][-2]["content"]
+            
+            # Eliminar última respuesta del asistente
+            current_chat["messages"].pop()
+            
+            # Recargar para borrar la respuesta vieja visualmente y procesar de nuevo
+            # Nota: Streamlit rerun reinicia el script, así que necesitamos una forma de saber que hay que procesar.
+            # Una forma simple es eliminar el mensaje y setear un flag, o simplemente llamar a process_query AQUI si no usamos st.chat_message containers que ya se cerraron.
+            # Pero como process_query usa st.chat_message, lo ideal es limpiar y correr.
+            
+            # Hack simple: Eliminar respuesta, y forzar ejecución inmediata
+            # Al hacer rerun, el historial tendrá 1 mensaje menos. 
+            # Pero necesitamos que se ejecute process_query.
+            # Mejor opción: Simular que el usuario acaba de enviar el mensaje.
+            
+            # Borramos el ultimo user msg tambien para re-inyectarlo?
+            # O simplemente llamamos a process_query?
+            # Si llamamos a process_query aqui, se dibujará ABAJO de todo (incluso del boton).
+            # Lo mejor es usar st.rerun() y un flag en session_state, o simplemente:
+            
+            # Estrategia: Borrar respuesta asistente. Borrar pregunta usuario. Poner pregunta en st.session_state.retry_prompt?
+            # No, mas facil:
+            
+            # 1. Borrar última respuesta
+            # current_chat["messages"].pop()
+            
+            # 2. Llamar process_query con la ultima pregunta (que sigue en el historial)
+            # El problema es que process_query escribe en la UI.
+            # Si lo hacemos aqui, quedará abajo del botón.
+            # Solución: Rerun y detectar que hay que reintentar? Complejo.
+            
+            # Solución Práctica:
+            # Eliminar la respuesta del historial.
+            # Eliminar la pregunta del historial.
+            # Forzar que el input sea la pregunta. (No se puede setear chat_input).
+            
+            # Vamos por la simple:
+            # Eliminar respuesta.
+            # Llamar process_query.
+            # Rerun.
+            
+            # Al llamar process_query, se agregará al historial.
+            # Pero visualmente se verá duplicado hasta el rerun?
+            # Probemos:
+            
+            process_query(last_user_msg)
+            st.rerun()

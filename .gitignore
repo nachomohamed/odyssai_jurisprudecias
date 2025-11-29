@@ -27,6 +27,7 @@ var/
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+*.log
 
 # Unit test / coverage reports
 htmlcov/
@@ -64,6 +65,7 @@ coverage.xml
 *.db
 *.sqlite3
 data/
+chroma_juris/
 
 # OS files
 .DS_Store
@@ -75,5 +77,15 @@ Thumbs.db
 openai_api_key.txt
 *.ipynb
 /converted_txt
+/converted_csv
+/converted_docx
 secrets.toml
 *.csv
+
+# Local Server Scripts & Tools
+start_servers.bat
+ngrok.exe
+ngrok.zip
+
+chroma.log
+*.log
