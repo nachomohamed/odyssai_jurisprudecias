@@ -15,7 +15,7 @@ from tenacity import retry, wait_random_exponential, stop_after_attempt
 from typing import Dict, Any, List, Optional
 
 # ========= CONFIGURACIÓN RÁPIDA (EDITABLE) =========
-OPENAI_API_KEY = "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" # <-- Cambiá esto o usá variable de entorno
+OPENAI_API_KEY = ""
 OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")            # Sugerido: 'gpt-4o-mini' (costo/latencia)
 BASE_URL       = os.getenv("OPENAI_BASE_URL", None)                  # Opcional (p.ej. LM Studio con compatibilidad)
 
