@@ -88,4 +88,8 @@ ngrok.exe
 ngrok.zip
 
 chroma.log
+
+# Legacy / Backup
+jurisv2/
+server_config.json
 *.log
