@@ -45,6 +45,7 @@ def update_config_and_push(url):
         subprocess.run(["git", "add", CONFIG_FILE], check=True)
         subprocess.run(["git", "commit", "-m", f"Update Ngrok URL: {host}"], check=True)
         subprocess.run(["git", "push", "origin", "develop"], check=True)
+        subprocess.run(["git", "push", "origin", "main"], check=True)
         print("🎉 URL actualizada en GitHub correctamente.")
     except subprocess.CalledProcessError as e:
         print(f"⚠️ Error en Git (puede que no haya cambios): {e}")
